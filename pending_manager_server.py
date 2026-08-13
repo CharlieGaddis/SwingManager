@@ -60,7 +60,7 @@ def ensure_dirs():
 def load_json(path: Path, default):
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8-sig") as handle:
         return json.load(handle)
 
 
@@ -70,6 +70,20 @@ def save_json(path: Path, value):
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(value, handle, indent=2)
     tmp.replace(path)
+
+
+def parse_json_from_process_output(output):
+    text = str(output or "").strip()
+    if not text:
+        raise ValueError("Submit helper did not return JSON output.")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start:end + 1])
+        raise
 
 
 def config():
@@ -420,14 +434,18 @@ def build_order_plan(row, quote, local):
         }
     legs = parse_contract_label(row.get("ContractLabel", ""))
     instructions = []
+    structure = str(row.get("Structure") or "").lower()
     if len(legs) == 1:
         instructions.append({**legs[0], "instruction": "BUY_TO_OPEN", "quantity": quantity})
+    elif len(legs) >= 2 and structure == "put_credit_spread":
+        instructions.append({**legs[0], "instruction": "SELL_TO_OPEN", "quantity": quantity})
+        instructions.append({**legs[1], "instruction": "BUY_TO_OPEN", "quantity": quantity})
     elif len(legs) >= 2:
         instructions.append({**legs[0], "instruction": "BUY_TO_OPEN", "quantity": quantity})
         instructions.append({**legs[1], "instruction": "SELL_TO_OPEN", "quantity": quantity})
     return {
         "method": "OPTION_BID_SIDE_THEN_MARK_LADDER",
-        "strategyLabel": "Option/spread bid-side debit for 60s, then mark",
+        "strategyLabel": "Option/spread bid-side price for 60s, then mark",
         "account": row.get("Account"),
         "underlying": row.get("Ticker"),
         "contractLabel": row.get("ContractLabel"),
@@ -713,7 +731,7 @@ def submit_live_order(row, phase):
         check=False)
     if completed.returncode != 0:
         raise RuntimeError((completed.stderr or completed.stdout).strip())
-    result = json.loads(completed.stdout)
+    result = parse_json_from_process_output(completed.stdout)
     if not result.get("accepted"):
         raise RuntimeError(f"Schwab did not accept order: {result}")
     order_id = str(result.get("orderId") or "")
@@ -746,7 +764,7 @@ def cancel_live_order(row, order_id):
         check=False)
     if completed.returncode != 0:
         raise RuntimeError((completed.stderr or completed.stdout).strip())
-    result = json.loads(completed.stdout)
+    result = parse_json_from_process_output(completed.stdout)
     if not result.get("accepted"):
         raise RuntimeError(f"Schwab did not accept cancel request: {result}")
     return result

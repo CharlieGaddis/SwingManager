@@ -71,6 +71,7 @@ static async Task<JsonObject> SubmitPlanAsync(HttpClient http, string planPath, 
     string accountHash = AccountHashFor(accounts, account);
     string assetType = RequiredString(plan, "assetType").ToLowerInvariant();
     string ticker = RequiredString(plan, "ticker").ToUpperInvariant();
+    string structure = ((string?)plan["structure"] ?? "").Trim().ToLowerInvariant();
     int quantity = RequiredInt(plan, "quantity");
     decimal triggerPrice = RequiredDecimal(plan, "triggerPrice");
     string phase = ((string?)plan["pricePhase"] ?? "initial").Trim().ToLowerInvariant();
@@ -110,17 +111,37 @@ static async Task<JsonObject> SubmitPlanAsync(HttpClient http, string planPath, 
         }
         else
         {
-            OptionContract shortLeg = Required(chain, parsed.Strikes[1]);
-            decimal debit = phase == "mark"
-                ? longLeg.Mark - shortLeg.Mark
-                : longLeg.Bid - shortLeg.Ask;
-            decimal limit = PositiveDebit(debit, $"{ticker} {string.Join("/", parsed.Strikes)}{parsed.Right[0]} {phase} debit");
-            payload = VerticalPayload(longLeg.Symbol, shortLeg.Symbol, quantity, limit);
-            payloadPricing["longBid"] = Money(longLeg.Bid);
-            payloadPricing["shortAsk"] = Money(shortLeg.Ask);
-            payloadPricing["longMark"] = Money(longLeg.Mark);
-            payloadPricing["shortMark"] = Money(shortLeg.Mark);
-            payloadPricing["submittedLimit"] = Money(limit);
+            if (structure == "put_credit_spread")
+            {
+                if (!parsed.Right.Equals("PUT", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"put_credit_spread requires PUT legs: {plan["contractLabel"]}");
+                OptionContract shortPut = Required(chain, parsed.Strikes[0]);
+                OptionContract longPut = Required(chain, parsed.Strikes[1]);
+                decimal credit = phase == "mark"
+                    ? shortPut.Mark - longPut.Mark
+                    : shortPut.Bid - longPut.Ask;
+                decimal limit = PositiveDebit(credit, $"{ticker} {string.Join("/", parsed.Strikes)}{parsed.Right[0]} {phase} credit");
+                payload = VerticalCreditPayload(shortPut.Symbol, longPut.Symbol, quantity, limit);
+                payloadPricing["shortBid"] = Money(shortPut.Bid);
+                payloadPricing["longAsk"] = Money(longPut.Ask);
+                payloadPricing["shortMark"] = Money(shortPut.Mark);
+                payloadPricing["longMark"] = Money(longPut.Mark);
+                payloadPricing["submittedLimit"] = Money(limit);
+            }
+            else
+            {
+                OptionContract shortLeg = Required(chain, parsed.Strikes[1]);
+                decimal debit = phase == "mark"
+                    ? longLeg.Mark - shortLeg.Mark
+                    : longLeg.Bid - shortLeg.Ask;
+                decimal limit = PositiveDebit(debit, $"{ticker} {string.Join("/", parsed.Strikes)}{parsed.Right[0]} {phase} debit");
+                payload = VerticalDebitPayload(longLeg.Symbol, shortLeg.Symbol, quantity, limit);
+                payloadPricing["longBid"] = Money(longLeg.Bid);
+                payloadPricing["shortAsk"] = Money(shortLeg.Ask);
+                payloadPricing["longMark"] = Money(longLeg.Mark);
+                payloadPricing["shortMark"] = Money(shortLeg.Mark);
+                payloadPricing["submittedLimit"] = Money(limit);
+            }
         }
         pricing = payloadPricing;
         pricing["phase"] = phase;
@@ -183,7 +204,7 @@ static async Task<JsonArray> SubmitPbfTestsAsync(HttpClient http, bool dryRun)
         new PlannedOrder(
             "PBF 65/75C spread Living Trust test",
             accounts.LivingTrustHash,
-            VerticalPayload(contracts.Call65.Symbol, contracts.Call75.Symbol, 6, spreadDebit),
+            VerticalDebitPayload(contracts.Call65.Symbol, contracts.Call75.Symbol, 6, spreadDebit),
             "Living Trust")
     };
 
@@ -262,7 +283,7 @@ static JsonObject SingleOptionPayload(string symbol, int quantity, decimal limit
         }
     };
 
-static JsonObject VerticalPayload(string longSymbol, string shortSymbol, int quantity, decimal debit) =>
+static JsonObject VerticalDebitPayload(string longSymbol, string shortSymbol, int quantity, decimal debit) =>
     new()
     {
         ["orderType"] = "NET_DEBIT",
@@ -296,6 +317,39 @@ static JsonObject VerticalPayload(string longSymbol, string shortSymbol, int qua
         }
     };
 
+static JsonObject VerticalCreditPayload(string shortSymbol, string longSymbol, int quantity, decimal credit) =>
+    new()
+    {
+        ["orderType"] = "NET_CREDIT",
+        ["session"] = "NORMAL",
+        ["price"] = Money(credit),
+        ["duration"] = "DAY",
+        ["orderStrategyType"] = "SINGLE",
+        ["complexOrderStrategyType"] = "VERTICAL",
+        ["orderLegCollection"] = new JsonArray
+        {
+            new JsonObject
+            {
+                ["instruction"] = "SELL_TO_OPEN",
+                ["quantity"] = quantity,
+                ["instrument"] = new JsonObject
+                {
+                    ["symbol"] = shortSymbol,
+                    ["assetType"] = "OPTION"
+                }
+            },
+            new JsonObject
+            {
+                ["instruction"] = "BUY_TO_OPEN",
+                ["quantity"] = quantity,
+                ["instrument"] = new JsonObject
+                {
+                    ["symbol"] = longSymbol,
+                    ["assetType"] = "OPTION"
+                }
+            }
+        }
+    };
 static async Task<SubmitResult> SubmitAsync(
     HttpClient http,
     string accessToken,

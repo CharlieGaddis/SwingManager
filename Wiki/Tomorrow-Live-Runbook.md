@@ -69,3 +69,10 @@ For tomorrow, OCO/stop handoff remains guarded/review-assisted. Use the dashboar
 - JSON upload/build endpoint passed with `squeeze-intel-2026-08-12.json`.
 - TOS preflight endpoint passed and produced `tos-oco-reconciliation-20260812-223113.csv`.
 - USB OCO dry-run matched both active spread stop parents at `63.19` without clicks.
+
+## 2026-08-13 Spread Direction Fix
+
+- Fixed put_credit_spread entry payloads to use NET_CREDIT: sell the higher-strike put and buy the lower-strike put.
+- Verified dry-run CXW 32/30P 09-18: SELL_TO_OPEN CXW 32P, BUY_TO_OPEN CXW 30P, NET_CREDIT.
+- Verified dry-run PBF 65/75C 09-18 still uses NET_DEBIT: BUY_TO_OPEN 65C, SELL_TO_OPEN 75C.
+- Swing Manager remains paper and monitor stopped until a final supervised paper/live-readiness check.
