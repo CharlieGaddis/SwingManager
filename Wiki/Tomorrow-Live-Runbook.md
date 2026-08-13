@@ -15,7 +15,9 @@ Dashboard URL: `http://127.0.0.1:8765`
 
 Trading Dashboard URL: `http://127.0.0.1:5080`
 
-## Current Readiness
+## Current safety posture
+
+After the CXW spread-order issue, keep Swing Manager in `paper` mode until option spread leg direction is fixed and retested.\n\n## Current Readiness
 
 Last checked on 2026-08-13:
 
@@ -42,6 +44,7 @@ Last checked on 2026-08-13:
 
 - Enabled rows only.
 - Before first live submit, Swing Manager checks Schwab recent orders for an active matching setup and blocks duplicate submission.
+- New live entries are limited to `09:35-15:30 America/New_York` on weekdays. The monitor may run outside that window, but live submits are skipped/blocked.
 - Trigger must still be valid at submit time.
 - Initial order uses bid-side pricing.
 - If still working after `bidPhaseSeconds`, Swing Manager cancels the initial order and submits one mark-price replacement.

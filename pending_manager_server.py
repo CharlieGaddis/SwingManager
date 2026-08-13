@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 ANALYSIS = ROOT / "Analysis"
@@ -73,6 +74,57 @@ def save_json(path: Path, value):
 
 def config():
     return load_json(CONFIG_PATH, {})
+
+
+def live_entry_window_config():
+    cfg = config().get("liveEntryWindow") or {}
+    return {
+        "timezone": cfg.get("timezone") or "America/New_York",
+        "start": cfg.get("start") or "09:35",
+        "end": cfg.get("end") or "15:30",
+        "weekdaysOnly": bool(cfg.get("weekdaysOnly", True)),
+    }
+
+
+def parse_hhmm(value):
+    match = re.match(r"^(\d{1,2}):(\d{2})$", str(value or ""))
+    if not match:
+        raise ValueError(f"Invalid live entry time: {value}")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        raise ValueError(f"Invalid live entry time: {value}")
+    return dt.time(hour, minute)
+
+
+def live_entry_window_status(now=None):
+    window = live_entry_window_config()
+    tz = ZoneInfo(window["timezone"])
+    current = now.astimezone(tz) if now else dt.datetime.now(tz)
+    start = parse_hhmm(window["start"])
+    end = parse_hhmm(window["end"])
+    local_time = current.time().replace(second=0, microsecond=0)
+    weekday_ok = (not window["weekdaysOnly"]) or current.weekday() < 5
+    in_window = weekday_ok and start <= local_time <= end
+    return {
+        "ok": in_window,
+        "timezone": window["timezone"],
+        "start": window["start"],
+        "end": window["end"],
+        "weekdaysOnly": window["weekdaysOnly"],
+        "localNow": current.isoformat(),
+        "reason": "within_live_entry_window" if in_window else "outside_live_entry_window",
+    }
+
+
+def require_live_entry_window():
+    status = live_entry_window_status()
+    if not status["ok"]:
+        raise RuntimeError(
+            f"Outside live entry window {status['start']}-{status['end']} {status['timezone']} "
+            f"(now {status['localNow']})"
+        )
+    return status
 
 
 def state():
@@ -460,6 +512,16 @@ def monitor_loop():
                     stored.setdefault("rows", {}).setdefault(ident, {}).update(local)
                     save_state(stored)
             if row["triggerHit"] and status not in blocked_statuses and not already_has_live_order:
+                if mode == "live":
+                    window_status = live_entry_window_status()
+                    if not window_status["ok"]:
+                        block_key = f"{window_status['reason']}|{window_status['localNow'][:16]}"
+                        if local.get("lastLiveWindowBlockKey") != block_key:
+                            local["lastLiveWindowBlockKey"] = block_key
+                            append_event(ident, "warning", "Skipped live submit outside configured entry window.", window_status)
+                        stored.setdefault("rows", {}).setdefault(ident, {}).update(local)
+                        save_state(stored)
+                        continue
                 local["status"] = "triggered"
                 append_event(ident, "info", f"Trigger hit for {row['Ticker']} at {row.get('TriggerOperator')} {row.get('TriggerPrice')}", {"mode": mode})
                 if mode == "paper":
@@ -611,6 +673,7 @@ def find_active_broker_order_for_row(row):
 def submit_live_order(row, phase):
     if not SUBMIT_PROJECT.exists():
         raise RuntimeError(f"Submit helper was not found: {SUBMIT_PROJECT}")
+    require_live_entry_window()
     duplicate = find_active_broker_order_for_row(row)
     if duplicate:
         order_id = duplicate.get("orderId", "")
