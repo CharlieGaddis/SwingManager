@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import datetime as dt
@@ -563,9 +563,59 @@ def swing_status_from_broker(status):
     return ""
 
 
+
+def active_broker_status(status):
+    text = str(status or "").upper()
+    return text in {"WORKING", "PENDING_ACTIVATION", "QUEUED", "ACCEPTED", "AWAITING_CONDITION"}
+
+
+def broker_order_leg_symbols(order):
+    symbols = set()
+    if not isinstance(order, dict):
+        return symbols
+    for leg in order.get("orderLegCollection") or []:
+        if isinstance(leg, dict):
+            instrument = leg.get("instrument") if isinstance(leg.get("instrument"), dict) else {}
+            symbol = str(instrument.get("symbol") or "").upper()
+            if symbol:
+                symbols.add(symbol)
+    for child in order.get("childOrderStrategies") or []:
+        symbols.update(broker_order_leg_symbols(child))
+    return symbols
+
+
+def broker_order_matches_row(order, row):
+    if not active_broker_status(order.get("status")):
+        return False
+    ticker = str(row.get("Ticker") or "").upper()
+    if not ticker:
+        return False
+    symbols = broker_order_leg_symbols(order)
+    if not symbols:
+        return False
+    asset_type = str(row.get("AssetType") or "").lower()
+    if asset_type == "stock":
+        return ticker in symbols
+    if asset_type == "option":
+        return any(symbol.startswith(ticker + " ") or symbol.startswith("." + ticker) or ticker in symbol for symbol in symbols)
+    return False
+
+
+def find_active_broker_order_for_row(row):
+    lookup = fetch_recent_order_lookup()
+    for order in lookup.values():
+        if broker_order_matches_row(order, row):
+            return order
+    return None
+
 def submit_live_order(row, phase):
     if not SUBMIT_PROJECT.exists():
         raise RuntimeError(f"Submit helper was not found: {SUBMIT_PROJECT}")
+    duplicate = find_active_broker_order_for_row(row)
+    if duplicate:
+        order_id = duplicate.get("orderId", "")
+        status = duplicate.get("status", "")
+        raise RuntimeError(f"Broker already has an active matching order for {row.get('Ticker')}: orderId={order_id}, status={status}")
     plan_dir = DATA_DIR / "live-submit-plans"
     plan_dir.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", row["id"])[:140]
@@ -902,6 +952,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-

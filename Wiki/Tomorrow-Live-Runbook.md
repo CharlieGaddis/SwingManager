@@ -1,7 +1,7 @@
-﻿# Swing Manager Live Runbook
+# Swing Manager Live Runbook
 
 Target session: 2026-08-13
-Last updated: 2026-08-12 22:45 ET
+Last updated: 2026-08-13 live-readiness check
 
 ## Launch
 
@@ -15,19 +15,15 @@ Dashboard URL: `http://127.0.0.1:8765`
 
 Trading Dashboard URL: `http://127.0.0.1:5080`
 
-## Current Blocker
+## Current Readiness
 
-Before live trading, Trading Dashboard Schwab auth must be restored.
+Last checked on 2026-08-13:
 
-Last checked status:
-
-- `connected: false`
-- `orderCapability: false`
-- `AUTHENTICATION_REQUIRED`
-- `HTTPS_CERTIFICATE_MISSING`
-- `SCHWAB_CALLBACK_CERTIFICATE_UNAVAILABLE`
-
-Swing Manager should not be switched to live execution until Schwab status is connected and order-capable.
+- Trading Dashboard Schwab status: `connected: true`, `orderCapability: true`, token not expired.
+- Swing Manager: `executionMode: live`, monitor stopped, quote feed populated.
+- Broker active-order readback: 0 active working orders from Schwab recent-order API.
+- Swing Manager now checks broker-side active matching orders before first live submit and fails closed if the check cannot run.
+- Do not start the monitor until enabled trigger-hit rows are reviewed. Current checkpoint found `CXW 32/30P 09-18` already trigger-hit and armed.
 
 ## Morning Readiness
 
@@ -39,13 +35,13 @@ Swing Manager should not be switched to live execution until Schwab status is co
 6. Review OCO statuses and pending entry rows.
 7. Confirm quote feed populates after Schwab auth is restored.
 8. Review every enabled row; uncheck or delete anything that should not auto-enter.
-9. Keep `executionMode` as `paper` until row review and Schwab preflight pass.
-10. Change `Config\pending-manager.json` to `"executionMode": "live"` only after final review.
-11. Start the monitor. Live startup should refuse if Schwab/account checks fail.
+9. Confirm `Config\pending-manager.json` is `"executionMode": "live"` only after final review.
+10. Start the monitor. Live startup should refuse if Schwab/account checks fail.
 
 ## Live Behavior
 
 - Enabled rows only.
+- Before first live submit, Swing Manager checks Schwab recent orders for an active matching setup and blocks duplicate submission.
 - Trigger must still be valid at submit time.
 - Initial order uses bid-side pricing.
 - If still working after `bidPhaseSeconds`, Swing Manager cancels the initial order and submits one mark-price replacement.
