@@ -21,8 +21,8 @@ After the CXW spread-order issue, keep Swing Manager in `paper` mode until optio
 
 Last checked on 2026-08-13:
 
-- Trading Dashboard Schwab status: `connected: true`, `orderCapability: true`, token not expired.
-- Swing Manager: `executionMode: live`, monitor stopped, quote feed populated.
+- Trading Dashboard Schwab status must be `connected: true`, `orderCapability: true`, token not expired. If `orderCapability` is false, do not go live.
+- Swing Manager current safe default: `executionMode: paper`, monitor stopped. Switch to `live` only after the morning preflight passes.
 - Broker active-order readback: 0 active working orders from Schwab recent-order API.
 - Swing Manager now checks broker-side active matching orders before first live submit and fails closed if the check cannot run.
 - Do not start the monitor until enabled trigger-hit rows are reviewed. Current checkpoint found `CXW 32/30P 09-18` already trigger-hit and armed.
@@ -76,3 +76,10 @@ For tomorrow, OCO/stop handoff remains guarded/review-assisted. Use the dashboar
 - Verified dry-run CXW 32/30P 09-18: SELL_TO_OPEN CXW 32P, BUY_TO_OPEN CXW 30P, NET_CREDIT.
 - Verified dry-run PBF 65/75C 09-18 still uses NET_DEBIT: BUY_TO_OPEN 65C, SELL_TO_OPEN 75C.
 - Swing Manager remains paper and monitor stopped until a final supervised paper/live-readiness check.
+
+## 2026-08-13 Readiness Review
+
+- Dashboard Upload + Build Queue endpoint was tested with squeeze-intel-2026-08-12.json: 38 pending entries, no workflow error.
+- Live order entry remains blocked unless Trading Dashboard reports Schwab orderCapability: true.
+- Mark replacement now checks the live-entry window before canceling an existing order, so it will not cancel first and then fail to re-submit outside the allowed window.
+- TOS preflight is required after tonight's JSON; any NOT_VISIBLE_IN_CURRENT_VIEW or REVIEW_* rows need manual review before live start.

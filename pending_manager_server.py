@@ -809,6 +809,10 @@ def maybe_replace_with_mark(row, row_state):
     if not row.get("triggerHit"):
         append_event(row["id"], "warning", "Skipped mark replacement because the trigger is no longer valid.", {"orderId": order_id})
         return False
+    window_status = live_entry_window_status()
+    if not window_status["ok"]:
+        append_event(row["id"], "warning", "Skipped mark replacement outside configured entry window.", {"orderId": order_id, **window_status})
+        return False
 
     append_event(row["id"], "info", "Canceling initial live order before mark replacement.", {"orderId": order_id})
     cancel = cancel_live_order(row, order_id)
