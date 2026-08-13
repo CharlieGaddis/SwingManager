@@ -1,0 +1,26 @@
+{
+  "tradingDashboardBaseUrl": "http://127.0.0.1:5080",
+  "executionMode": "paper",
+  "quotePollSeconds": 5,
+  "firstMinuteRefreshSeconds": 15,
+  "bidPhaseSeconds": 60,
+  "enableCancelReplaceLadder": true,
+  "maxCancelReplaceCount": 1,
+  "stockInitialPriceBasis": "BID",
+  "stockFallbackPriceBasis": "MARK",
+  "optionInitialPriceBasis": "BID_SIDE_DEBIT",
+  "optionFallbackPriceBasis": "MARK",
+  "stockMaxCapital": 5000.0,
+  "accounts": {
+    "IRA": {
+      "label": "IRA",
+      "intendedUse": "Stock pending entries",
+      "accountHash": ""
+    },
+    "Living Trust": {
+      "label": "Living Trust",
+      "intendedUse": "Option pending entries",
+      "accountHash": ""
+    }
+  }
+}

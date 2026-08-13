@@ -1,0 +1,249 @@
+param(
+    [string]$WindowTitle = "Order Rules",
+    [string]$OutFile = "$PSScriptRoot\..\Analysis\tos-jab-control-inventory.csv",
+    [int]$MaxDepth = 40,
+    [int]$MaxChildrenPerNode = 250
+)
+
+$ErrorActionPreference = "Stop"
+
+$bridgeDll = "C:\Program Files\thinkorswim2\jre\bin\windowsaccessbridge-64.dll"
+if (-not (Test-Path -LiteralPath $bridgeDll)) {
+    throw "Java Access Bridge DLL not found at $bridgeDll"
+}
+
+$code = @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+
+public static class TosJabInventory {
+    private const string Bridge = @"C:\Program Files\thinkorswim2\jre\bin\windowsaccessbridge-64.dll";
+    public const int MAX_STRING_SIZE = 1024;
+    public const int SHORT_STRING_SIZE = 256;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct AccessibleContextInfo {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = MAX_STRING_SIZE)]
+        public string name;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = MAX_STRING_SIZE)]
+        public string description;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = SHORT_STRING_SIZE)]
+        public string role;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = SHORT_STRING_SIZE)]
+        public string role_en_US;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = SHORT_STRING_SIZE)]
+        public string states;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = SHORT_STRING_SIZE)]
+        public string states_en_US;
+        public int indexInParent;
+        public int childrenCount;
+        public int x;
+        public int y;
+        public int width;
+        public int height;
+        public int accessibleComponent;
+        public int accessibleAction;
+        public int accessibleSelection;
+        public int accessibleText;
+        public int accessibleValue;
+        public int accessibleInterfaces;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct AccessibleTextInfo {
+        public int charCount;
+        public int caretIndex;
+        public int indexAtPoint;
+    }
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSG {
+        public IntPtr hwnd;
+        public uint message;
+        public UIntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public int pt_x;
+        public int pt_y;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool PeekMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+
+    [DllImport("user32.dll")]
+    public static extern bool TranslateMessage(ref MSG lpMsg);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr DispatchMessage(ref MSG lpMsg);
+
+    [DllImport(Bridge, EntryPoint = "Windows_run", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void Windows_run();
+
+    [return: MarshalAs(UnmanagedType.U1)]
+    [DllImport(Bridge, EntryPoint = "isJavaWindow", CallingConvention = CallingConvention.Cdecl)]
+    public static extern bool isJavaWindow(IntPtr hWnd);
+
+    [return: MarshalAs(UnmanagedType.U1)]
+    [DllImport(Bridge, EntryPoint = "getAccessibleContextFromHWND", CallingConvention = CallingConvention.Cdecl)]
+    public static extern bool getAccessibleContextFromHWND(IntPtr hWnd, out int vmID, out IntPtr ac);
+
+    [return: MarshalAs(UnmanagedType.U1)]
+    [DllImport(Bridge, EntryPoint = "getAccessibleContextInfo", CallingConvention = CallingConvention.Cdecl)]
+    public static extern bool getAccessibleContextInfo(int vmID, IntPtr ac, ref AccessibleContextInfo info);
+
+    [DllImport(Bridge, EntryPoint = "getAccessibleChildFromContext", CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr getAccessibleChildFromContext(int vmID, IntPtr ac, int childIndex);
+
+    [DllImport(Bridge, EntryPoint = "releaseJavaObject", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void ReleaseJavaObject(int vmID, IntPtr javaObject);
+
+    [return: MarshalAs(UnmanagedType.U1)]
+    [DllImport(Bridge, EntryPoint = "getAccessibleTextInfo", CallingConvention = CallingConvention.Cdecl)]
+    public static extern bool getAccessibleTextInfo(int vmID, IntPtr ac, ref AccessibleTextInfo info, int x, int y);
+
+    [return: MarshalAs(UnmanagedType.U1)]
+    [DllImport(Bridge, EntryPoint = "getAccessibleTextRange", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    public static extern bool getAccessibleTextRange(int vmID, IntPtr ac, int start, int end, StringBuilder text, short len);
+
+    public static string GetTitle(IntPtr hwnd) {
+        var sb = new StringBuilder(512);
+        GetWindowText(hwnd, sb, sb.Capacity);
+        return sb.ToString();
+    }
+
+    public static void PumpMessages(int milliseconds) {
+        var until = DateTime.UtcNow.AddMilliseconds(milliseconds);
+        MSG msg;
+        while (DateTime.UtcNow < until) {
+            while (PeekMessage(out msg, IntPtr.Zero, 0, 0, 1)) {
+                TranslateMessage(ref msg);
+                DispatchMessage(ref msg);
+            }
+            System.Threading.Thread.Sleep(15);
+        }
+    }
+}
+"@
+
+Add-Type -TypeDefinition $code
+
+[TosJabInventory]::Windows_run()
+[TosJabInventory]::PumpMessages(3000)
+
+$matches = New-Object System.Collections.Generic.List[object]
+$callback = [TosJabInventory+EnumWindowsProc]{
+    param([IntPtr]$hwnd, [IntPtr]$lparam)
+    if ([TosJabInventory]::IsWindowVisible($hwnd)) {
+        $title = [TosJabInventory]::GetTitle($hwnd)
+        if ($title -like "*$WindowTitle*") {
+            $matches.Add([pscustomobject]@{ Hwnd = $hwnd; Title = $title }) | Out-Null
+        }
+    }
+    return $true
+}
+[TosJabInventory]::EnumWindows($callback, [IntPtr]::Zero) | Out-Null
+
+if ($matches.Count -eq 0) {
+    throw "No visible window found with title containing '$WindowTitle'."
+}
+
+$target = $matches[0]
+$isJava = [TosJabInventory]::isJavaWindow($target.Hwnd)
+Write-Host "Matched window '$($target.Title)' HWND=$($target.Hwnd) IsJavaWindow=$isJava"
+
+$vmID = 0
+$rootAc = [IntPtr]::Zero
+if (-not [TosJabInventory]::getAccessibleContextFromHWND($target.Hwnd, [ref]$vmID, [ref]$rootAc)) {
+    throw "Java Access Bridge could not get the root accessible context for '$($target.Title)'."
+}
+
+$rows = New-Object System.Collections.Generic.List[object]
+
+function Get-TextValue {
+    param([IntPtr]$Ac)
+
+    $textInfo = New-Object TosJabInventory+AccessibleTextInfo
+    if (-not [TosJabInventory]::getAccessibleTextInfo($vmID, $Ac, [ref]$textInfo, 0, 0)) {
+        return ""
+    }
+    if ($textInfo.charCount -le 0) {
+        return ""
+    }
+
+    $len = [Math]::Min($textInfo.charCount, 1023)
+    $buffer = New-Object System.Text.StringBuilder 1024
+    if (-not [TosJabInventory]::getAccessibleTextRange($vmID, $Ac, 0, $len, $buffer, [int16]1024)) {
+        return ""
+    }
+    return $buffer.ToString()
+}
+
+function Walk-Node {
+    param(
+        [int]$Depth,
+        [IntPtr]$Ac,
+        [string]$Path
+    )
+
+    if ($Depth -gt $MaxDepth -or $Ac -eq [IntPtr]::Zero) { return }
+
+    $info = New-Object TosJabInventory+AccessibleContextInfo
+    if (-not [TosJabInventory]::getAccessibleContextInfo($vmID, $Ac, [ref]$info)) {
+        return
+    }
+
+    $isInteresting =
+        -not [string]::IsNullOrWhiteSpace($info.name) -or
+        $info.accessibleAction -ne 0 -or
+        $info.accessibleText -ne 0 -or
+        $info.accessibleValue -ne 0 -or
+        $info.role_en_US -in @("combo box", "spinbox", "text", "table", "check box", "push button", "toggle button")
+
+    if ($isInteresting) {
+        $rows.Add([pscustomobject]@{
+            Path = $Path
+            Depth = $Depth
+            Role = $info.role_en_US
+            Name = $info.name
+            Description = $info.description
+            States = $info.states_en_US
+            Bounds = "$($info.x),$($info.y),$($info.width),$($info.height)"
+            Children = $info.childrenCount
+            Action = $info.accessibleAction
+            Text = $info.accessibleText
+            TextValue = if ($info.accessibleText -ne 0) { Get-TextValue -Ac $Ac } else { "" }
+            Value = $info.accessibleValue
+        }) | Out-Null
+    }
+
+    $childCount = [Math]::Min($info.childrenCount, $MaxChildrenPerNode)
+    for ($i = 0; $i -lt $childCount; $i++) {
+        $child = [TosJabInventory]::getAccessibleChildFromContext($vmID, $Ac, $i)
+        if ($child -ne [IntPtr]::Zero) {
+            $childPath = if ($Path -eq "") { "$i" } else { "$Path/$i" }
+            Walk-Node -Depth ($Depth + 1) -Ac $child -Path $childPath
+            [TosJabInventory]::ReleaseJavaObject($vmID, $child)
+        }
+    }
+}
+
+Walk-Node -Depth 0 -Ac $rootAc -Path ""
+
+$outDir = Split-Path -Parent $OutFile
+if (-not (Test-Path -LiteralPath $outDir)) {
+    New-Item -ItemType Directory -Path $outDir | Out-Null
+}
+$rows | Export-Csv -LiteralPath $OutFile -NoTypeInformation -Encoding UTF8
+Write-Host "Wrote $($rows.Count) control inventory rows to $OutFile"

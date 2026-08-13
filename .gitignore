@@ -1,0 +1,24 @@
+﻿# Runtime state and private operational artifacts
+Data/
+*.log
+.env
+.env.*
+Config/*local*.json
+Config/*secret*.json
+
+# Generated Analysis outputs
+Analysis/
+
+# Build/cache output
+__pycache__/
+*.pyc
+.pytest_cache/
+tools/**/bin/
+tools/**/obj/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

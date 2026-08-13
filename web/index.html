@@ -1,0 +1,55 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Swing Manager Pending Orders</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Swing Manager</h1>
+      <p id="subhead">Pending entry monitor</p>
+    </div>
+    <div class="actions">
+      <button id="themeBtn" type="button">Dark Mode</button>
+      <button id="refreshBtn" type="button">Refresh Quotes</button>
+      <button id="startBtn" type="button">Start Monitor</button>
+      <button id="stopBtn" type="button">Stop Monitor</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="status-band">
+      <div><span>Execution</span><strong id="executionMode">...</strong></div>
+      <div><span>Monitor</span><strong id="monitorState">...</strong></div>
+      <div><span>Quote Feed</span><strong id="quoteState">...</strong></div>
+      <div><span>Queue</span><strong id="queuePath">...</strong></div>
+    </section>
+
+
+    <section class="workflow-panel">
+      <div class="workflow-head">
+        <h2>Nightly Workflow</h2>
+        <div class="workflow-actions">
+          <input id="jsonFile" type="file" accept="application/json,.json">
+          <label class="checkline"><input id="captureTosOnUpload" type="checkbox"> Capture TOS</label>
+          <button id="uploadJsonBtn" class="primary" type="button">Upload + Build Queue</button>
+          <button id="runPreflightBtn" type="button">Run TOS Preflight</button>
+        </div>
+      </div>
+      <div id="workflowStatus" class="workflow-status">No workflow status loaded.</div>
+    </section>
+    <section id="accounts"></section>
+
+    <section class="oco-review">
+      <h2>OCO Review</h2>
+      <div id="ocoReview" class="oco-grid"></div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
+
