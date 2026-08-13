@@ -1,6 +1,6 @@
 {
   "tradingDashboardBaseUrl": "http://127.0.0.1:5080",
-  "executionMode": "live",
+  "executionMode": "paper",
   "quotePollSeconds": 5,
   "firstMinuteRefreshSeconds": 15,
   "bidPhaseSeconds": 60,
