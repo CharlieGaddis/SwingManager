@@ -1,5 +1,6 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
+SetTitleMatchMode(3)
 CoordMode("Mouse", "Screen")
 
 relX := A_Args.Length >= 1 ? Integer(A_Args[1]) : 0
@@ -15,32 +16,31 @@ result := "NotFound"
 absX := ""
 absY := ""
 
-for candidate in WinGetList("ahk_exe thinkorswim.exe") {
-    candidateTitle := ""
-    try candidateTitle := WinGetTitle("ahk_id " candidate)
-    if (candidateTitle = "Main@thinkorswim [build 1992]") {
-        hwnd := candidate
-        title := candidateTitle
-        try {
-            WinRestore("ahk_id " hwnd)
-            WinActivate("ahk_id " hwnd)
-            WinWaitActive("ahk_id " hwnd, , 3)
-            WinGetPos(&x, &y, &w, &h, "ahk_id " hwnd)
-            absX := x + relX
-            absY := y + relY
-            MouseMove(0, 0, 0)
+try {
+    hwnd := WinExist("Main@thinkorswim [build 1992] ahk_exe thinkorswim.exe")
+    if (hwnd) {
+        title := WinGetTitle("ahk_id " hwnd)
+        WinRestore("ahk_id " hwnd)
+        WinActivate("ahk_id " hwnd)
+        WinWaitActive("ahk_id " hwnd, , 3)
+        WinGetPos(&x, &y, &w, &h, "ahk_id " hwnd)
+        absX := x + relX
+        absY := y + relY
+        if (clickCount <= 0) {
+            result := "LocatedOnly"
+        } else {
+            MouseMove(absX, absY, 0)
             Sleep(120)
-            if (button = "Right")
+            if (button == "Right")
                 MouseClick("Right", absX, absY, clickCount)
             else
                 MouseClick("Left", absX, absY, clickCount)
             Sleep(500)
             result := "Clicked"
-        } catch as err {
-            result := "Error: " err.Message
         }
-        break
     }
+} catch as err {
+    result := "Error: " err.Message
 }
 
 outDir := RegExReplace(outFile, "\\[^\\]+$")

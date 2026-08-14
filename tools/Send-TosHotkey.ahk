@@ -1,5 +1,6 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
+SetTitleMatchMode(3)
 
 keys := A_Args.Length >= 1 ? A_Args[1] : "^1"
 label := A_Args.Length >= 2 ? A_Args[2] : "hotkey"
@@ -9,23 +10,18 @@ result := "NotFound"
 hwnd := ""
 title := ""
 
-for candidate in WinGetList("ahk_exe thinkorswim.exe") {
-    candidateTitle := ""
-    try candidateTitle := WinGetTitle("ahk_id " candidate)
-    if (candidateTitle = "Main@thinkorswim [build 1992]") {
-        hwnd := candidate
-        title := candidateTitle
-        try {
-            WinRestore("ahk_id " hwnd)
-            WinActivate("ahk_id " hwnd)
-            WinWaitActive("ahk_id " hwnd, , 3)
-            Send(keys)
-            Sleep(700)
-            result := "Sent"
-        } catch as err {
-            result := "Error: " err.Message
-        }
-        break
+hwnd := WinExist("Main@thinkorswim [build 1992] ahk_exe thinkorswim.exe")
+if (hwnd) {
+    title := WinGetTitle("ahk_id " hwnd)
+    try {
+        WinRestore("ahk_id " hwnd)
+        WinActivate("ahk_id " hwnd)
+        WinWaitActive("ahk_id " hwnd, , 3)
+        Send(keys)
+        Sleep(700)
+        result := "Sent"
+    } catch as err {
+        result := "Error: " err.Message
     }
 }
 
