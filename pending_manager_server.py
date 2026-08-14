@@ -220,11 +220,43 @@ def load_oco_review():
         "jsonUpdates": json_updates,
     }
 
+def load_worklist_review():
+    worklist_path = latest_file("swing-nightly-worklist-*.csv")
+    update_queue_path = latest_file("swing-oco-update-queue-*.csv")
+    update_levels_path = latest_file("swing-oco-update-levels-*.csv")
+    exceptions_path = latest_file("swing-oco-exceptions-review-*.csv")
+    worklist = read_csv_rows(worklist_path)
+    update_queue = read_csv_rows(update_queue_path)
+    update_levels = read_csv_rows(update_levels_path)
+    exceptions = read_csv_rows(exceptions_path)
+    counts = {}
+    for row in worklist:
+        priority = row.get("Priority") or "UNKNOWN"
+        counts[priority] = counts.get(priority, 0) + 1
+    blocking_priorities = {"MISSING_OCO", "UPDATE_OCO", "BUILD_OCO", "JSON_CHANGED", "ORDER_STRUCTURE_REVIEW", "LOCATE_IN_TOS"}
+    blocking = [row for row in worklist if row.get("Priority") in blocking_priorities]
+    return {
+        "worklistPath": str(worklist_path) if worklist_path else None,
+        "updateQueuePath": str(update_queue_path) if update_queue_path else None,
+        "updateLevelsPath": str(update_levels_path) if update_levels_path else None,
+        "exceptionsPath": str(exceptions_path) if exceptions_path else None,
+        "counts": counts,
+        "blockingCount": len(blocking),
+        "updateQueueCount": len(update_queue),
+        "updateLevelCount": len(update_levels),
+        "exceptionCount": len(exceptions),
+        "blocking": blocking,
+        "updateQueue": update_queue,
+        "updateLevels": update_levels,
+        "exceptions": exceptions,
+    }
+
 
 def workflow_status():
     base = load_json(NIGHTLY_STATUS_PATH, {})
     rows, queue_path = load_pending_rows()
     oco = load_oco_review()
+    worklist = load_worklist_review()
     base.update({
         "queuePath": queue_path,
         "pendingCount": len(rows),
@@ -232,6 +264,11 @@ def workflow_status():
         "ocoReconciliationPath": oco.get("reconciliationPath"),
         "ocoUpdateQueuePath": oco.get("updateQueuePath"),
         "actionQueuePath": oco.get("actionQueuePath"),
+        "worklistPath": worklist.get("worklistPath"),
+        "worklistCounts": worklist.get("counts", {}),
+        "worklistBlockingCount": worklist.get("blockingCount", 0),
+        "ocoUpdateLevelCount": worklist.get("updateLevelCount", 0),
+        "ocoUpdateLevelsPath": worklist.get("updateLevelsPath"),
     })
     return base
 
@@ -268,6 +305,60 @@ def save_uploaded_json(filename, content):
         json.dump(parsed, handle, indent=2)
     return target, parsed
 
+
+def previous_json_for(source_path: Path):
+    parsed = load_json(source_path, {})
+    scan_date = parsed.get("scan_date") if isinstance(parsed, dict) else ""
+    if not scan_date:
+        return None
+    try:
+        previous = dt.datetime.fromisoformat(str(scan_date)).date() - dt.timedelta(days=1)
+    except ValueError:
+        return None
+    path = ANALYSIS / f"squeeze-intel-{previous.isoformat()}.json"
+    return path if path.exists() else None
+
+
+def run_nightly_reconciliation(source_path: Path):
+    script = ROOT / "Invoke-SwingNightlyReconciliation.ps1"
+    if not script.exists():
+        raise FileNotFoundError(f"Missing nightly reconciliation script: {script}")
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-TodayPath",
+        str(source_path),
+        "-OutDir",
+        str(ANALYSIS),
+        "-TradingDashboardBaseUrl",
+        config().get("tradingDashboardBaseUrl", "http://127.0.0.1:5080"),
+    ]
+    previous = previous_json_for(source_path)
+    if previous:
+        command.extend(["-PreviousPath", str(previous)])
+    tos = latest_file("tos-oco-reconciliation-*.csv")
+    if tos:
+        command.extend(["-TosReconciliationPath", str(tos)])
+    started = utc_now()
+    result = subprocess.run(command, cwd=str(ROOT), text=True, capture_output=True, timeout=180)
+    status = {
+        "lastReconcileStartedAt": started,
+        "lastReconcileFinishedAt": utc_now(),
+        "lastReconcileOk": result.returncode == 0,
+        "lastReconcileCommand": " ".join(command),
+        "lastReconcileStdout": result.stdout[-6000:],
+        "lastReconcileStderr": result.stderr[-6000:],
+        "lastReconcileError": "",
+    }
+    save_workflow_status(status)
+    if result.returncode != 0:
+        save_workflow_status({"lastReconcileOk": False, "lastReconcileError": result.stderr.strip() or result.stdout.strip() or "Nightly reconciliation failed."})
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Nightly reconciliation failed.")
+    return workflow_status()
 
 def run_nightly_update(source_path: Path, capture_tos=False):
     script = ROOT / "Update-SwingManagerNightly.ps1"
@@ -890,6 +981,11 @@ def live_preflight():
             issues.append("Living Trust account ending 9157 was not found.")
     except Exception as exc:
         issues.append(f"Could not resolve Schwab account numbers: {exc}")
+    worklist = load_worklist_review()
+    if not worklist.get("worklistPath"):
+        issues.append("OCO/stop worklist has not been built from the latest JSON/preflight.")
+    elif int(worklist.get("blockingCount") or 0) > 0:
+        issues.append(f"OCO/stop worklist has {worklist.get('blockingCount')} unresolved protection rows.")
     cfg = config()
     runtime["last_live_preflight"] = {
         "checkedAt": utc_now(),
@@ -1013,6 +1109,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "status": status})
             except Exception as exc:
                 save_workflow_status({"lastRunOk": False, "lastRunError": str(exc)})
+                return self.send_json({"ok": False, "error": str(exc), "status": workflow_status()}, status=500)
+        if parsed.path == "/api/nightly/reconcile":
+            try:
+                body = self.read_json()
+                source = body.get("sourcePath") or workflow_status().get("lastUploadPath") or workflow_status().get("sourceJson")
+                if not source:
+                    return self.send_json({"ok": False, "error": "Upload a JSON file before building the OCO worklist."}, status=400)
+                status = run_nightly_reconciliation(Path(source))
+                return self.send_json({"ok": True, "status": status})
+            except Exception as exc:
+                save_workflow_status({"lastReconcileOk": False, "lastReconcileError": str(exc)})
                 return self.send_json({"ok": False, "error": str(exc), "status": workflow_status()}, status=500)
         if parsed.path == "/api/monitor/start":
             try:

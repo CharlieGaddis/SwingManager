@@ -1,4 +1,4 @@
-﻿const accountsEl = document.getElementById("accounts");
+const accountsEl = document.getElementById("accounts");
 const queuePathEl = document.getElementById("queuePath");
 const executionModeEl = document.getElementById("executionMode");
 const monitorStateEl = document.getElementById("monitorState");
@@ -13,6 +13,7 @@ const jsonFileEl = document.getElementById("jsonFile");
 const captureTosOnUploadEl = document.getElementById("captureTosOnUpload");
 const uploadJsonBtn = document.getElementById("uploadJsonBtn");
 const runPreflightBtn = document.getElementById("runPreflightBtn");
+const buildWorklistBtn = document.getElementById("buildWorklistBtn");
 
 function fmt(value, places = 2) {
   const n = Number(value);
@@ -174,19 +175,24 @@ function workflowStatusHtml(status) {
   const ok = status.lastRunOk;
   const runState = ok === true ? "Ready" : ok === false ? "Needs review" : "Not run";
   const counts = Object.entries(status.ocoCounts || {}).map(([name, count]) => `${name}: ${count}`).join(" | ");
+  const worklistCounts = Object.entries(status.worklistCounts || {}).map(([name, count]) => `${name}: ${count}`).join(" | ");
   return `
     <div class="workflow-cards">
       <div><span>Run State</span><strong>${runState}</strong></div>
       <div><span>JSON</span><strong title="${status.sourceJson || status.lastUploadPath || ""}">${pathLeaf(status.sourceJson || status.lastUploadPath) || "none"}</strong></div>
       <div><span>Pending Entries</span><strong>${status.pendingCount ?? 0}</strong></div>
       <div><span>OCO Review</span><strong>${counts || "none"}</strong></div>
+      <div><span>OCO Worklist</span><strong>${status.worklistBlockingCount ?? 0} blockers / ${status.ocoUpdateLevelCount ?? 0} levels</strong></div>
     </div>
     ${status.lastRunError ? `<div class="workflow-error">${status.lastRunError}</div>` : ""}
     <div class="workflow-files">
       <span title="${status.actionQueuePath || ""}">Queue: ${pathLeaf(status.actionQueuePath) || "none"}</span>
       <span title="${status.ocoReconciliationPath || ""}">TOS: ${pathLeaf(status.ocoReconciliationPath) || "none"}</span>
       <span title="${status.ocoUpdateQueuePath || ""}">Updates: ${pathLeaf(status.ocoUpdateQueuePath) || "none"}</span>
-    </div>`;
+      <span title="${status.worklistPath || ""}">Worklist: ${pathLeaf(status.worklistPath) || "none"}</span>
+      <span title="${status.ocoUpdateLevelsPath || ""}">Levels: ${pathLeaf(status.ocoUpdateLevelsPath) || "none"}</span>
+    </div>
+    ${worklistCounts ? `<div class="workflow-files">Worklist counts: ${worklistCounts}</div>` : ""}`;
 }
 
 async function loadWorkflowStatus() {
@@ -252,6 +258,28 @@ async function runTosPreflight() {
   } catch (error) {
     workflowStatusEl.innerHTML = `<div class="workflow-error">${error.message || error}</div>`;
   } finally {
+    runPreflightBtn.disabled = false;
+    uploadJsonBtn.disabled = false;
+  }
+}
+async function buildOcoWorklist() {
+  buildWorklistBtn.disabled = true;
+  runPreflightBtn.disabled = true;
+  uploadJsonBtn.disabled = true;
+  workflowStatusEl.textContent = "Building OCO/stop worklist...";
+  try {
+    const response = await fetch("/api/nightly/reconcile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "OCO worklist failed.");
+    await load();
+  } catch (error) {
+    workflowStatusEl.innerHTML = `<div class="workflow-error">${error.message || error}</div>`;
+  } finally {
+    buildWorklistBtn.disabled = false;
     runPreflightBtn.disabled = false;
     uploadJsonBtn.disabled = false;
   }
@@ -366,6 +394,7 @@ function setTheme(theme) {
 
 uploadJsonBtn?.addEventListener("click", uploadJsonAndBuildQueue);
 runPreflightBtn?.addEventListener("click", runTosPreflight);
+buildWorklistBtn?.addEventListener("click", buildOcoWorklist);
 
 themeBtn.addEventListener("click", () => {
   const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -375,6 +404,3 @@ themeBtn.addEventListener("click", () => {
 setTheme(localStorage.getItem("swingTheme") || "light");
 load();
 setInterval(load, 5000);
-
-
-

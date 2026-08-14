@@ -34,11 +34,12 @@ Last checked on 2026-08-13:
 3. Start Swing Manager.
 4. Upload the current Squeeze Intel JSON through `Nightly Workflow -> Upload + Build Queue`.
 5. Run `Nightly Workflow -> Run TOS Preflight` with TOS open and logged in.
-6. Review OCO statuses and pending entry rows.
-7. Confirm quote feed populates after Schwab auth is restored.
-8. Review every enabled row; uncheck or delete anything that should not auto-enter.
-9. Confirm `Config\pending-manager.json` is `"executionMode": "live"` only after final review.
-10. Start the monitor. Live startup should refuse if Schwab/account checks fail.
+6. Run `Nightly Workflow -> Build OCO Worklist`; live start is blocked while protection rows remain unresolved.
+7. Review OCO statuses, OCO worklist blockers, and pending entry rows.
+8. Confirm quote feed populates after Schwab auth is restored.
+9. Review every enabled row; uncheck or delete anything that should not auto-enter.
+10. Confirm `Config\pending-manager.json` is `"executionMode": "live"` only after final review.
+11. Start the monitor. Live startup should refuse if Schwab/account checks, order capability, or OCO/stop protection checks fail.
 
 ## Live Behavior
 
@@ -83,3 +84,11 @@ For tomorrow, OCO/stop handoff remains guarded/review-assisted. Use the dashboar
 - Live order entry remains blocked unless Trading Dashboard reports Schwab orderCapability: true.
 - Mark replacement now checks the live-entry window before canceling an existing order, so it will not cancel first and then fail to re-submit outside the allowed window.
 - TOS preflight is required after tonight's JSON; any NOT_VISIBLE_IN_CURRENT_VIEW or REVIEW_* rows need manual review before live start.
+
+## 2026-08-13 OCO Worklist Gate
+
+- Added dashboard action: Nightly Workflow -> Build OCO Worklist.
+- The worklist combines JSON diff, Schwab working-order structure, and TOS/JAB reconciliation into one protection queue.
+- Live preflight blocks Start Monitor while the OCO worklist has unresolved protection rows.
+- Current test against the 2026-08-12 report produced 28 blockers and 57 individual stop/target level rows, proving the gate catches unfinished protection work instead of letting live entries proceed silently.
+- This does not yet perform unattended final TOS submit; it creates the enforced worklist and prevents live start until protection work is resolved or explicitly reviewed.
