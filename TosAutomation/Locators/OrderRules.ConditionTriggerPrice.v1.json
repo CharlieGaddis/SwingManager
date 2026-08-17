@@ -1,0 +1,64 @@
+﻿{
+  "id": "OrderRules.ConditionTriggerPrice.v1",
+  "screenState": "OrderRulesDialog.ConditionsExpanded",
+  "purpose": "Locate and activate the threshold text field in an underlying-symbol submit-condition row.",
+  "anchors": [
+    {
+      "nameRegex": "Submit when at least one of the following conditions is met",
+      "roleRegex": "label|panel|text"
+    },
+    {
+      "nameRegex": "^(Symbol|Method|Trigger|Threshold)$",
+      "roleRegex": "label|table|panel"
+    }
+  ],
+  "target": {
+    "rowAnchor": "underlying symbol, e.g. CROX or USB",
+    "method": "MARK",
+    "operator": ">= or <= from JSON/TOS condition",
+    "direction": "submit-side condition table, same row as symbol/method/operator",
+    "preferredAction": "native click at table-relative threshold activation point, Ctrl+A, type threshold, Tab",
+    "verification": "rediscover row and require the focused/editable text control or row text to contain the new threshold"
+  },
+  "geometry": {
+    "basis": "submit condition table bounds",
+    "capturedTableBounds": { "x": 572, "y": 602, "width": 450, "height": 32 },
+    "capturedMousePoint": { "x": 943, "y": 606 },
+    "capturedHitBounds": { "x": 925, "y": 605, "width": 70, "height": 9 },
+    "thresholdClick": {
+      "xRatioFromTableLeft": 0.8244,
+      "yOffsetFromTableTop": 4,
+      "notes": "Earlier row-center Y estimate was too low. The editable text hit was near table top + 4px. Prefer this point for initial activation, then rediscover focused text bounds."
+    }
+  },
+  "scoring": {
+    "nameMatch": 40,
+    "roleMatch": 20,
+    "visibleShowing": 10,
+    "nearAnchor": 15,
+    "insideExpectedRegion": 10,
+    "focusedOrEditable": 5,
+    "minimumConfidence": 70
+  },
+  "evidence": [
+    {
+      "capturedAt": "2026-08-14T18:21:30-04:00",
+      "snapshot": "TosAutomation/Discovery/tos-OrderRulesDialog-20260814-182130-tree.json",
+      "symbol": "CROX",
+      "method": "MARK",
+      "operator": ">=",
+      "submitAtChecked": false
+    },
+    {
+      "capturedAt": "2026-08-14T18:25:18-04:00",
+      "capture": "TosAutomation/Discovery/tos-element-under-mouse-20260814-182518.json",
+      "hitRole": "text",
+      "hitStates": "enabled,focusable,visible,showing,focused,editable,single line"
+    }
+  ],
+  "notes": [
+    "Do not use cached child indexes after expanding conditions or saving Order Rules.",
+    "Submit at must remain unchecked before saving.",
+    "TOS may report threshold editor bounds as -1 in the full table snapshot until the field is focused; use table-relative activation, then rediscover."
+  ]
+}

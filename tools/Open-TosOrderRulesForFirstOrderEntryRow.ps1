@@ -6,7 +6,7 @@ param(
     [string]$RowTablePath = "0/0/1/2/0/1/1/0/0/1/1/0/0/1/0/1/0/0/0/0/0/0/0",
     [int]$MaxSearchDepth = 35,
     [int]$MaxSearchNodes = 90000,
-    [int]$OrderRulesOffsetX = 754,
+    [int]$OrderRulesOffsetX = 0,
     [switch]$DryRun,
     [string]$OutFile = "$PSScriptRoot\..\Analysis\tos-open-order-rules-result.csv"
 )
@@ -134,7 +134,7 @@ $callback = [TosOpenOrderRules+EnumWindowsProc]{
     param([IntPtr]$hwnd, [IntPtr]$lparam)
     if ([TosOpenOrderRules]::IsWindowVisible($hwnd)) {
         $title = [TosOpenOrderRules]::GetTitle($hwnd)
-        if ($title -eq $WindowTitle) {
+        if ($title -eq $WindowTitle -or $title -like "$WindowTitle*") {
             $matches.Add([pscustomobject]@{ Hwnd = $hwnd; Title = $title }) | Out-Null
         }
     }
@@ -258,12 +258,21 @@ function Test-OrderRulesOpen {
         param([IntPtr]$hwnd, [IntPtr]$lparam)
         if ([TosOpenOrderRules]::IsWindowVisible($hwnd)) {
             $title = [TosOpenOrderRules]::GetTitle($hwnd)
-            if ($title -eq "Order Rules") { $script:found = $true }
+            if ($title -like "Order Rules*") { $script:found = $true }
         }
         return $true
     }
     [TosOpenOrderRules]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
-    return $found
+    if ($found) { return $true }
+    try {
+        return (
+            (Find-NameInSubtree -Ac $rootAc -Name "Submit at:" -MaxDepth 35) -or
+            (Find-NameInSubtree -Ac $rootAc -Name "Submit when at least one of the following conditions is met:" -MaxDepth 35) -or
+            (Find-NameInSubtree -Ac $rootAc -Name "Save" -MaxDepth 35)
+        )
+    } catch {
+        return $false
+    }
 }
 
 $resolved = $null
@@ -298,12 +307,17 @@ if (-not $symbolOk -or -not $sideOk -or -not $quantityOk) {
     throw "Refusing to open rules. Expected row verification failed. Symbol=$symbolOk Side=$sideOk Quantity=$quantityOk."
 }
 
-$clickX = [int]($rowInfo.x + $OrderRulesOffsetX)
-$clickY = [int]($rowInfo.y + ($rowInfo.height / 2))
+$gearInsetX = 24
+$clickX = if ($OrderRulesOffsetX -gt 0) {
+    [int]($rowInfo.x + $OrderRulesOffsetX)
+} else {
+    [int]($rowInfo.x + [Math]::Max(30, $rowInfo.width - $gearInsetX))
+}
+$clickY = [int]($rowInfo.y + [Math]::Max(7, [Math]::Min(($rowInfo.height / 4), 10)))
 $beforeOpen = Test-OrderRulesOpen
 $clicked = $false
 
-if (-not $DryRun) {
+if (-not $DryRun -and -not $beforeOpen) {
     [TosOpenOrderRules]::Click($clickX, $clickY)
     $clicked = $true
 }

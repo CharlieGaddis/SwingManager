@@ -152,6 +152,21 @@ function ocoRowHtml(row) {
     </tr>`;
 }
 
+function desktopOcoItemHtml(item) {
+  return `
+    <tr>
+      <td class="workflow-inline-actions"><button type="button" data-action="plan-desktop-oco" data-symbol="${item.Symbol || ""}" data-phase="${item.Phase || ""}" data-oco-id="${item.OcoId || ""}" data-replacing-order-id="${item.ReplacingOrderId || ""}">Plan</button><button type="button" data-action="preview-desktop-oco" data-symbol="${item.Symbol || ""}" data-phase="${item.Phase || ""}" data-oco-id="${item.OcoId || ""}" data-replacing-order-id="${item.ReplacingOrderId || ""}">Preview</button><button type="button" data-action="send-desktop-oco" data-symbol="${item.Symbol || ""}" data-phase="${item.Phase || ""}" data-oco-id="${item.OcoId || ""}" data-replacing-order-id="${item.ReplacingOrderId || ""}">Final Send</button></td>
+      <td>${item.TargetAccountAlias || item.CurrentTosAccountAlias || ""}</td>
+      <td title="${item.InstrumentLabel || ""}">${item.Symbol || ""} ${item.InstrumentLabel || ""}</td>
+      <td>${item.Phase || ""}</td>
+      <td title="${item.OcoId || ""}">${item.OcoId || ""}</td>
+      <td title="${item.ReplacingOrderId || ""}">${item.ReplacingOrderId || ""}</td>
+      <td class="num">${money(item.CurrentThreshold)}</td>
+      <td class="num">${money(item.ExpectedThreshold)}</td>
+      <td class="num">${money(item.Delta)}</td>
+      <td>${item.SnapshotStatus || ""}</td>
+    </tr>`;
+}
 function jsonUpdateHtml(row) {
   return `
     <tr>
@@ -183,6 +198,7 @@ function workflowStatusHtml(status) {
       <div><span>Pending Entries</span><strong>${status.pendingCount ?? 0}</strong></div>
       <div><span>OCO Review</span><strong>${counts || "none"}</strong></div>
       <div><span>OCO Worklist</span><strong>${status.worklistBlockingCount ?? 0} blockers / ${status.ocoUpdateLevelCount ?? 0} levels</strong></div>
+      <div><span>Desktop OCO Batch</span><strong>${status.desktopOcoBatchReadyCount ?? 0} ready / ${status.desktopOcoBatchUpdateCount ?? 0} updates</strong></div>
     </div>
     ${status.lastRunError ? `<div class="workflow-error">${status.lastRunError}</div>` : ""}
     <div class="workflow-files">
@@ -191,6 +207,7 @@ function workflowStatusHtml(status) {
       <span title="${status.ocoUpdateQueuePath || ""}">Updates: ${pathLeaf(status.ocoUpdateQueuePath) || "none"}</span>
       <span title="${status.worklistPath || ""}">Worklist: ${pathLeaf(status.worklistPath) || "none"}</span>
       <span title="${status.ocoUpdateLevelsPath || ""}">Levels: ${pathLeaf(status.ocoUpdateLevelsPath) || "none"}</span>
+      <span title="${status.desktopOcoBatchPath || ""}">Desktop batch: ${pathLeaf(status.desktopOcoBatchPath) || "none"}</span>
     </div>
     ${worklistCounts ? `<div class="workflow-files">Worklist counts: ${worklistCounts}</div>` : ""}`;
 }
@@ -329,12 +346,174 @@ async function loadOcoReview() {
           </thead>
           <tbody>${updates.map(jsonUpdateHtml).join("")}</tbody>
         </table>
+      </div>
+      <h3>Desktop OCO Updates</h3>
+      <div class="oco-summary desktop-oco-head">
+        <span>${data.desktopBatch?.readyCount || 0} ready / ${data.desktopBatch?.updateCount || 0} updates, target ${data.desktopBatch?.targetAccount?.Alias || "current"} ${data.desktopBatch?.targetAccount?.Ending || ""}, TOS account ${data.desktopBatch?.currentTosAccount?.Alias || "unknown"} ${data.desktopBatch?.currentTosAccount?.Ending || ""}</span>
+        <span class="workflow-inline-actions">
+          <button type="button" data-action="prepare-account-oco" data-account="Living Trust">Prepare Living Trust</button>
+          <button type="button" data-action="prepare-account-oco" data-account="IRA">Prepare IRA</button>
+          <button type="button" data-action="preview-next-desktop-oco">Run Next Preview</button>
+          <button type="button" data-action="send-next-desktop-oco">Run Next Final Send</button>
+        </span>
+      </div>
+      <div id="desktopOcoPlan" class="workflow-files"></div>
+      <div class="table-wrap">
+        <table class="oco-table">
+          <thead>
+            <tr>
+              <th style="width:210px">Action</th>
+              <th style="width:110px">Account</th>
+              <th style="width:180px">Order</th>
+              <th style="width:70px">Phase</th>
+              <th style="width:132px">OCO ID</th>
+              <th style="width:132px">Replacing</th>
+              <th style="width:90px" class="num">Current</th>
+              <th style="width:90px" class="num">Expected</th>
+              <th style="width:80px" class="num">Delta</th>
+              <th style="width:100px">Status</th>
+            </tr>
+          </thead>
+          <tbody>${(data.desktopBatch?.readyItems || []).map(desktopOcoItemHtml).join("")}</tbody>
+        </table>
       </div>`;
   } catch (error) {
     ocoReviewEl.textContent = `OCO review unavailable: ${error}`;
   }
 }
 
+async function prepareDesktopOcoAccount(target) {
+  const planEl = document.getElementById("desktopOcoPlan");
+  const account = target.dataset.account;
+  if (planEl) planEl.textContent = `Preparing ${account} TOS batch...`;
+  try {
+    const response = await fetch("/api/oco/prepare-account", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `Could not prepare ${account}.`);
+    if (planEl) {
+      const status = data.status || {};
+      planEl.textContent = `Prepared ${account}: ${status.desktopOcoBatchReadyCount || 0} ready / ${status.desktopOcoBatchUpdateCount || 0} updates.`;
+    }
+    await load();
+  } catch (error) {
+    if (planEl) planEl.innerHTML = `<span class="workflow-error">${error.message || error}</span>`;
+  }
+}
+
+async function planDesktopOcoItem(target) {
+  const planEl = document.getElementById("desktopOcoPlan");
+  if (planEl) planEl.textContent = "Building desktop OCO plan...";
+  const payload = {
+    symbol: target.dataset.symbol,
+    phase: target.dataset.phase,
+    ocoId: target.dataset.ocoId,
+    replacingOrderId: target.dataset.replacingOrderId,
+  };
+  try {
+    const response = await fetch("/api/oco/desktop-batch/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Desktop OCO plan failed.");
+    const step = data.plan?.nextOperatorStep || {};
+    if (planEl) {
+      planEl.innerHTML = `Selected ${step.symbol || ""} ${step.phase || ""}: ${money(step.currentThreshold)} -> ${money(step.expectedThreshold)}. Command: <code>${step.applyCommand || ""}</code>`;
+    }
+  } catch (error) {
+    if (planEl) planEl.innerHTML = `<span class="workflow-error">${error.message || error}</span>`;
+  }
+}
+
+
+async function runDesktopOcoWorkflow(target, stage, allowFinalSend = false) {
+  const planEl = document.getElementById("desktopOcoPlan");
+  const payload = {
+    symbol: target.dataset.symbol,
+    phase: target.dataset.phase,
+    ocoId: target.dataset.ocoId,
+    replacingOrderId: target.dataset.replacingOrderId,
+    stage,
+    allowInput: true,
+    allowFinalSend,
+  };
+  if (allowFinalSend) {
+    const ok = confirm(`Final Send for ${payload.symbol} ${payload.phase} OCO ${payload.ocoId}?`);
+    if (!ok) return;
+  }
+  if (planEl) planEl.textContent = `${stage} running for ${payload.symbol} ${payload.phase}...`;
+  try {
+    const response = await fetch("/api/oco/desktop-workflow", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Desktop OCO workflow failed.");
+    const result = data.result || {};
+    const condition = result.expectedConditionText || "";
+    const errors = (result.errors || []).join("; ");
+    if (planEl) {
+      planEl.innerHTML = `<span>${stage} ${result.success ? "completed" : "finished with review"}: ${condition}</span>${errors ? ` <span class="workflow-error">${errors}</span>` : ""}`;
+    }
+    await loadWorkflowStatus();
+  } catch (error) {
+    if (planEl) planEl.innerHTML = `<span class="workflow-error">${error.message || error}</span>`;
+  }
+}
+
+async function runNextDesktopOcoWorkflow(stage, allowFinalSend = false) {
+  const planEl = document.getElementById("desktopOcoPlan");
+  if (allowFinalSend) {
+    const ok = confirm("Final Send for the next ready desktop OCO update?");
+    if (!ok) return;
+  }
+  if (planEl) planEl.textContent = `${stage} running for next ready desktop OCO update...`;
+  try {
+    const response = await fetch("/api/oco/desktop-workflow/next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stage, allowInput: true, allowFinalSend }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Next desktop OCO workflow failed.");
+    const selected = data.result?.selected || {};
+    const result = data.result?.result || data.result || {};
+    const condition = result.expectedConditionText || result.message || "";
+    if (planEl) {
+      planEl.innerHTML = `<span>Next ${selected.symbol || ""} ${selected.phase || ""} ${stage} completed: ${condition}</span>`;
+    }
+    await load();
+  } catch (error) {
+    if (planEl) planEl.innerHTML = `<span class="workflow-error">${error.message || error}</span>`;
+  }
+}
+ocoReviewEl?.addEventListener("click", async (event) => {
+  const target = event.target;
+  if (target?.dataset?.action === "plan-desktop-oco") {
+    await planDesktopOcoItem(target);
+  }
+  if (target?.dataset?.action === "preview-desktop-oco") {
+    await runDesktopOcoWorkflow(target, "RunToConfirmation", false);
+  }
+  if (target?.dataset?.action === "send-desktop-oco") {
+    await runDesktopOcoWorkflow(target, "RunToFinalSend", true);
+  }
+  if (target?.dataset?.action === "preview-next-desktop-oco") {
+    await runNextDesktopOcoWorkflow("RunToConfirmation", false);
+  }
+  if (target?.dataset?.action === "send-next-desktop-oco") {
+    await runNextDesktopOcoWorkflow("RunToFinalSend", true);
+  }
+  if (target?.dataset?.action === "prepare-account-oco") {
+    await prepareDesktopOcoAccount(target);
+  }
+});
 async function load(path = "/api/pending") {
   const response = await fetch(path);
   const data = await response.json();

@@ -1,0 +1,27 @@
+param(
+  [string]$WindowTitle = "Main@thinkorswim [build 1992]",
+  [string]$ExpectedSymbol = "USB",
+  [string]$ExpectedSide = "SELL",
+  [string]$OutFile = "$PSScriptRoot\..\Analysis\tos-order-entry-row-children.csv"
+)
+$ErrorActionPreference='Stop'
+$bridgeDll='C:\Program Files\thinkorswim2\jre\bin\windowsaccessbridge-64.dll'
+$code=@"
+using System;using System.Text;using System.Runtime.InteropServices;
+public static class J{public const int A=1024;public const int B=256;[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]public struct I{[MarshalAs(UnmanagedType.ByValTStr,SizeConst=A)]public string name;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=A)]public string description;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=B)]public string role;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=B)]public string role_en_US;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=B)]public string states;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=B)]public string states_en_US;public int indexInParent,childrenCount,x,y,width,height,accessibleComponent,accessibleAction,accessibleSelection,accessibleText,accessibleValue,accessibleInterfaces;}[StructLayout(LayoutKind.Sequential)]public struct M{public IntPtr hwnd;public uint message;public UIntPtr wParam;public IntPtr lParam;public uint time;public int pt_x,pt_y;}public delegate bool E(IntPtr h,IntPtr l);[DllImport("user32.dll")]public static extern bool EnumWindows(E cb,IntPtr lp);[DllImport("user32.dll")]public static extern bool IsWindowVisible(IntPtr h);[DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern int GetWindowText(IntPtr h,StringBuilder sb,int max);[DllImport("user32.dll")]public static extern bool PeekMessage(out M m,IntPtr h,uint a,uint b,uint c);[DllImport("user32.dll")]public static extern bool TranslateMessage(ref M m);[DllImport("user32.dll")]public static extern IntPtr DispatchMessage(ref M m);[DllImport("C:\\Program Files\\thinkorswim2\\jre\\bin\\windowsaccessbridge-64.dll",EntryPoint="Windows_run",CallingConvention=CallingConvention.Cdecl)]public static extern void Run();[return:MarshalAs(UnmanagedType.U1)][DllImport("C:\\Program Files\\thinkorswim2\\jre\\bin\\windowsaccessbridge-64.dll",EntryPoint="getAccessibleContextFromHWND",CallingConvention=CallingConvention.Cdecl)]public static extern bool Root(IntPtr h,out int vm,out IntPtr ac);[return:MarshalAs(UnmanagedType.U1)][DllImport("C:\\Program Files\\thinkorswim2\\jre\\bin\\windowsaccessbridge-64.dll",EntryPoint="getAccessibleContextInfo",CallingConvention=CallingConvention.Cdecl)]public static extern bool Info(int vm,IntPtr ac,ref I i);[DllImport("C:\\Program Files\\thinkorswim2\\jre\\bin\\windowsaccessbridge-64.dll",EntryPoint="getAccessibleChildFromContext",CallingConvention=CallingConvention.Cdecl)]public static extern IntPtr Child(int vm,IntPtr ac,int idx);[DllImport("C:\\Program Files\\thinkorswim2\\jre\\bin\\windowsaccessbridge-64.dll",EntryPoint="releaseJavaObject",CallingConvention=CallingConvention.Cdecl)]public static extern void Rel(int vm,IntPtr ac);public static string Title(IntPtr h){var sb=new StringBuilder(512);GetWindowText(h,sb,sb.Capacity);return sb.ToString();}public static void Pump(int ms){var until=DateTime.UtcNow.AddMilliseconds(ms);M m;while(DateTime.UtcNow<until){while(PeekMessage(out m,IntPtr.Zero,0,0,1)){TranslateMessage(ref m);DispatchMessage(ref m);}System.Threading.Thread.Sleep(15);}}}
+"@
+Add-Type -TypeDefinition $code
+[J]::Run();[J]::Pump(2500)
+$script:hwnd=[IntPtr]::Zero;$cb=[J+E]{param([IntPtr]$h,[IntPtr]$l) if([J]::IsWindowVisible($h)){if([J]::Title($h)-eq $WindowTitle){$script:hwnd=$h}};$true};[J]::EnumWindows($cb,[IntPtr]::Zero)|Out-Null
+$vm=0;$root=[IntPtr]::Zero;if(-not [J]::Root($script:hwnd,[ref]$vm,[ref]$root)){throw 'no root'}
+function Info($ac){$i=New-Object J+I;if([J]::Info($vm,$ac,[ref]$i)){$i}else{$null}}
+function HasName($ac,$name,$d=0){if($d -gt 12){return $false};$i=Info $ac;if(!$i){return $false};if($i.name -eq $name){return $true};for($c=0;$c -lt $i.childrenCount;$c++){$ch=[J]::Child($vm,$ac,$c);if($ch -ne [IntPtr]::Zero){$f=HasName $ch $name ($d+1);[J]::Rel($vm,$ch);if($f){return $true}}};$false}
+$script:target=[IntPtr]::Zero
+function Walk($ac,$path='',$d=0){if($script:target -ne [IntPtr]::Zero -or $d -gt 35){return};$i=Info $ac;if(!$i){return};if($i.role_en_US -eq 'table' -and $i.x -ge 0 -and $i.width -gt 300 -and (HasName $ac $ExpectedSymbol) -and (HasName $ac $ExpectedSide)){$script:target=$ac;$script:tpath=$path;return};for($c=0;$c -lt $i.childrenCount;$c++){$ch=[J]::Child($vm,$ac,$c);if($ch -ne [IntPtr]::Zero){$p=if($path){"$path/$c"}else{"$c"};Walk $ch $p ($d+1);if($script:target -ne $ch){[J]::Rel($vm,$ch)}}}}
+Walk $root
+if($script:target -eq [IntPtr]::Zero){throw 'no row'}
+$rows=New-Object System.Collections.Generic.List[object]
+function Dump($ac,$path,$d=0){if($d -gt 5){return};$i=Info $ac;if(!$i){return};$rows.Add([pscustomobject]@{Path=$path;Depth=$d;Role=$i.role_en_US;Name=$i.name;Desc=$i.description;States=$i.states_en_US;Bounds="$($i.x),$($i.y),$($i.width),$($i.height)";Children=$i.childrenCount})|Out-Null;for($c=0;$c -lt $i.childrenCount;$c++){$ch=[J]::Child($vm,$ac,$c);if($ch -ne [IntPtr]::Zero){Dump $ch "$path/$c" ($d+1);[J]::Rel($vm,$ch)}}}
+Dump $script:target $script:tpath
+$rows | Export-Csv -LiteralPath $OutFile -NoTypeInformation -Encoding UTF8
+$rows | Format-Table -AutoSize -Wrap | Out-String -Width 240

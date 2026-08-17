@@ -10,11 +10,32 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "tools\TosPrivacyRedactor.psm1") -Force
 
 if (-not (Test-Path -LiteralPath $OutDir)) {
     New-Item -ItemType Directory -Path $OutDir | Out-Null
 }
 
+function Get-AccountEnding([string]$accountNumber) {
+    if ([string]::IsNullOrWhiteSpace($accountNumber) -or $accountNumber.Length -lt 4) { return "" }
+    return $accountNumber.Substring($accountNumber.Length - 4)
+}
+
+function ConvertTo-AccountSafeDiagnosticText([string]$text) {
+    $safe = ConvertTo-TosSanitizedText $text
+    $safe = [regex]::Replace($safe, '(?i)((?:"?accountNumber"?|AccountNumber|ExpectedAccountNumber)\s*[:=,]\s*"?)(\d{8})(?="|\b)', '${1}ACCOUNT_REDACTED')
+    return $safe
+}
+
+function ConvertTo-SafeOrderRow($row) {
+    $row | Select-Object `
+        @{Name='AccountNumber';Expression={'ACCOUNT_REDACTED'}},
+        @{Name='AccountEnding';Expression={Get-AccountEnding ([string]$_.AccountNumber)}},
+        ParentOrderId,ParentStatus,ParentStrategy,EnteredTime,ChildOrderId,ChildStatus,OrderType,
+        ComplexOrderStrategyType,Duration,Quantity,RemainingQuantity,Underlying,Price,PriceLinkBasis,
+        PriceLinkType,PriceOffset,StopPrice,StopPriceLinkBasis,StopPriceLinkType,StopPriceOffset,
+        StopType,LegSummary,ConditionalTriggerFromApi
+}
 function Get-FirstLeg($order) {
     if ($order.orderLegCollection -and @($order.orderLegCollection).Count -gt 0) {
         return @($order.orderLegCollection)[0]
@@ -108,8 +129,10 @@ $rowsPath = Join-Path $OutDir "schwab-working-orders-api-rows-$stamp.csv"
 $reconPath = Join-Path $OutDir "schwab-working-orders-api-reconciliation-$stamp.csv"
 $reportPath = Join-Path $OutDir "schwab-working-orders-api-report-$stamp.md"
 
-$orders | ConvertTo-Json -Depth 50 | Set-Content -LiteralPath $rawPath -Encoding UTF8
-$rows | Export-Csv -LiteralPath $rowsPath -NoTypeInformation
+$safeOrdersJson = ConvertTo-AccountSafeDiagnosticText ($orders | ConvertTo-Json -Depth 50)
+$safeOrdersJson | Set-Content -LiteralPath $rawPath -Encoding UTF8
+$safeRows = @($rows | ForEach-Object { ConvertTo-SafeOrderRow $_ })
+$safeRows | Export-Csv -LiteralPath $rowsPath -NoTypeInformation
 
 $reconRows = @()
 if (Test-Path -LiteralPath $ActionQueuePath) {
@@ -125,7 +148,8 @@ if (Test-Path -LiteralPath $ActionQueuePath) {
         $hasStop = Test-HasOrderType $matches "STOP"
         [pscustomobject]@{
             Account = $item.Account
-            ExpectedAccountNumber = $expectedAccountNumber
+            ExpectedAccountNumber = "ACCOUNT_REDACTED"
+            ExpectedAccountEnding = Get-AccountEnding $expectedAccountNumber
             Portfolio = $item.Portfolio
             Ticker = $item.Ticker
             ContractLabel = $item.ContractLabel
@@ -148,7 +172,8 @@ if (Test-Path -LiteralPath $ActionQueuePath) {
                 else { "WORKING_ORDER_FOUND_UNCLASSIFIED" }
         }
     }
-    $reconRows | Export-Csv -LiteralPath $reconPath -NoTypeInformation
+    $safeReconRows = @($reconRows | ForEach-Object { $_ })
+$safeReconRows | Export-Csv -LiteralPath $reconPath -NoTypeInformation
 }
 
 $md = New-Object System.Collections.Generic.List[string]
@@ -161,7 +186,7 @@ $md.Add("- Parent orders returned: $(@($orders).Count)")
 $md.Add("- Flattened child/order rows: $(@($rows).Count)")
 $md.Add("")
 $md.Add("## Working Order Rows")
-$md.Add(($rows | Select-Object AccountNumber,ParentOrderId,ParentStatus,ParentStrategy,ChildOrderId,ChildStatus,OrderType,ComplexOrderStrategyType,Duration,Quantity,Underlying,Price,PriceLinkBasis,PriceOffset,StopPrice,StopPriceLinkBasis,StopPriceOffset,StopType,ConditionalTriggerFromApi | Format-Table -AutoSize | Out-String -Width 260).TrimEnd())
+$md.Add(($safeRows | Select-Object AccountNumber,AccountEnding,ParentOrderId,ParentStatus,ParentStrategy,ChildOrderId,ChildStatus,OrderType,ComplexOrderStrategyType,Duration,Quantity,Underlying,Price,PriceLinkBasis,PriceOffset,StopPrice,StopPriceLinkBasis,StopPriceOffset,StopType,ConditionalTriggerFromApi | Format-Table -AutoSize | Out-String -Width 260).TrimEnd())
 
 if (@($reconRows).Count) {
     $md.Add("")
@@ -169,7 +194,8 @@ if (@($reconRows).Count) {
     $md.Add(($reconRows | Format-Table -AutoSize | Out-String -Width 260).TrimEnd())
 }
 
-Set-Content -LiteralPath $reportPath -Value ($md -join [Environment]::NewLine) -Encoding UTF8
+$safeReport = ConvertTo-AccountSafeDiagnosticText ($md -join [Environment]::NewLine)
+Set-Content -LiteralPath $reportPath -Value $safeReport -Encoding UTF8
 
 [pscustomobject]@{
     ReportPath = (Resolve-Path -LiteralPath $reportPath).Path

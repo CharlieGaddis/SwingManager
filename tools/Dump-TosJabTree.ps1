@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "TosPrivacyRedactor.psm1") -Force
 
 $bridgeDll = "C:\Program Files\thinkorswim2\jre\bin\windowsaccessbridge-64.dll"
 if (-not (Test-Path -LiteralPath $bridgeDll)) {
@@ -154,7 +155,8 @@ if (-not [string]::IsNullOrWhiteSpace($Hwnd)) {
     $target = $matches[0]
 }
 $isJava = [TosJab]::isJavaWindow($target.Hwnd)
-Write-Host "Matched window '$($target.Title)' HWND=$($target.Hwnd) IsJavaWindow=$isJava"
+$sanitizedTitle = ConvertTo-TosSanitizedText $target.Title
+Write-Host "Matched window '$sanitizedTitle' HWND=$($target.Hwnd) IsJavaWindow=$isJava"
 $vmID = 0
 $rootAc = [IntPtr]::Zero
 if (-not [TosJab]::getAccessibleContextFromHWND($target.Hwnd, [ref]$vmID, [ref]$rootAc)) {
@@ -162,7 +164,7 @@ if (-not [TosJab]::getAccessibleContextFromHWND($target.Hwnd, [ref]$vmID, [ref]$
 }
 
 $lines = New-Object System.Collections.Generic.List[string]
-$lines.Add("Window: $($target.Title)") | Out-Null
+$lines.Add("Window: $(ConvertTo-TosSanitizedText $target.Title)") | Out-Null
 $lines.Add("HWND: $($target.Hwnd)  VMID: $vmID  RootAC: $rootAc") | Out-Null
 $lines.Add("Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')") | Out-Null
 $lines.Add("") | Out-Null
@@ -181,8 +183,10 @@ function Add-Node {
         return
     }
 
-    $name = if ([string]::IsNullOrWhiteSpace($info.name)) { "" } else { " name=`"$($info.name)`"" }
-    $desc = if ([string]::IsNullOrWhiteSpace($info.description)) { "" } else { " desc=`"$($info.description)`"" }
+    $safeName = ConvertTo-TosSanitizedText $info.name
+    $safeDescription = ConvertTo-TosSanitizedText $info.description
+    $name = if ([string]::IsNullOrWhiteSpace($safeName)) { "" } else { " name=`"$safeName`"" }
+    $desc = if ([string]::IsNullOrWhiteSpace($safeDescription)) { "" } else { " desc=`"$safeDescription`"" }
     $states = if ([string]::IsNullOrWhiteSpace($info.states_en_US)) { "" } else { " states=`"$($info.states_en_US)`"" }
     $bounds = " bounds=$($info.x),$($info.y),$($info.width),$($info.height)"
     $flags = " comp=$($info.accessibleComponent) act=$($info.accessibleAction) text=$($info.accessibleText) value=$($info.accessibleValue)"
@@ -207,5 +211,6 @@ $outDir = Split-Path -Parent $OutFile
 if (-not (Test-Path -LiteralPath $outDir)) {
     New-Item -ItemType Directory -Path $outDir | Out-Null
 }
-$lines | Set-Content -LiteralPath $OutFile -Encoding UTF8
+$sanitizedLines = @(ConvertTo-TosSanitizedLines -Lines ([string[]]$lines.ToArray()))
+$sanitizedLines | Set-Content -LiteralPath $OutFile -Encoding UTF8
 Write-Host "Wrote Java Access Bridge tree to $OutFile"

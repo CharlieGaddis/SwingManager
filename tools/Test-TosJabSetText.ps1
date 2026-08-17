@@ -153,7 +153,7 @@ $callback = [TosJabSetText+EnumWindowsProc]{
     param([IntPtr]$hwnd, [IntPtr]$lparam)
     if ([TosJabSetText]::IsWindowVisible($hwnd)) {
         $title = [TosJabSetText]::GetTitle($hwnd)
-        if ($title -like "*$WindowTitle*") {
+        if ($title.IndexOf($WindowTitle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $matches.Add([pscustomobject]@{ Hwnd = $hwnd; Title = $title }) | Out-Null
         }
     }

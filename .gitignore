@@ -8,11 +8,15 @@ Config/*secret*.json
 
 # Generated Analysis outputs
 Analysis/
+TosAutomation/Discovery/
+TosAutomation/Diagnostics/
+tools/TosAutomation/Diagnostics/
 
 # Build/cache output
 __pycache__/
 *.pyc
 .pytest_cache/
+SwingManager/
 tools/**/bin/
 tools/**/obj/
 

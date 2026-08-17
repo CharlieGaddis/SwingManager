@@ -4,6 +4,9 @@ param(
     [string]$TradingDashboardBaseUrl = "http://127.0.0.1:5080",
     [string]$OutDir = ".\Analysis",
     [string]$TosReconciliationPath = "",
+    [string]$TosVisibleOrdersPath = "",
+    [string]$TosSnapshotJson = "",
+    [string]$TargetAccount = "",
     [string]$ExceptionRegistryPath = ".\Config\swing-oco-exceptions.csv",
     [decimal]$StockMaxCapital = 5000.00,
     [decimal]$DefaultOptionBudget = 2500.00,
@@ -86,6 +89,15 @@ function Get-UpdateLevelRows($worklistRows) {
     }
 }
 
+function Get-AccountEnding([string]$accountNumber) {
+    if ([string]::IsNullOrWhiteSpace($accountNumber) -or $accountNumber.Length -lt 4) { return "" }
+    return $accountNumber.Substring($accountNumber.Length - 4)
+}
+
+function Get-RedactedAccountNumber([string]$accountNumber) {
+    if ([string]::IsNullOrWhiteSpace($accountNumber)) { return "" }
+    return "ACCOUNT_REDACTED"
+}
 function Get-ExpectedAccountNumber([string]$accountName) {
     switch ($accountName) {
         "IRA" { return $IraAccountNumber }
@@ -150,7 +162,8 @@ foreach ($entry in @($queueRows | Where-Object { $_.Action -eq "PENDING_ENTRY_TR
         Priority = "ENTRY_MONITOR"
         Action = "WATCH_AND_SUBMIT_ENTRY"
         Account = $entry.Account
-        ExpectedAccountNumber = Get-ExpectedAccountNumber $entry.Account
+        ExpectedAccountNumber = Get-RedactedAccountNumber (Get-ExpectedAccountNumber $entry.Account)
+        ExpectedAccountEnding = Get-AccountEnding (Get-ExpectedAccountNumber $entry.Account)
         Portfolio = $entry.Portfolio
         Ticker = $entry.Ticker
         ContractLabel = $entry.ContractLabel
@@ -213,7 +226,8 @@ foreach ($expected in @($queueRows | Where-Object { $_.Action -eq "EXPECTED_ACTI
         Priority = $priority
         Action = $action
         Account = $expected.Account
-        ExpectedAccountNumber = Get-ExpectedAccountNumber $expected.Account
+        ExpectedAccountNumber = Get-RedactedAccountNumber (Get-ExpectedAccountNumber $expected.Account)
+        ExpectedAccountEnding = Get-AccountEnding (Get-ExpectedAccountNumber $expected.Account)
         Portfolio = $expected.Portfolio
         Ticker = $expected.Ticker
         ContractLabel = $expected.ContractLabel
@@ -233,7 +247,8 @@ foreach ($update in @($queueRows | Where-Object { $_.Action -eq "OCO_REVIEW_REQU
         Priority = "JSON_CHANGED"
         Action = "QUEUE_OCO_UPDATE_FROM_JSON_DIFF"
         Account = $update.Account
-        ExpectedAccountNumber = Get-ExpectedAccountNumber $update.Account
+        ExpectedAccountNumber = Get-RedactedAccountNumber (Get-ExpectedAccountNumber $update.Account)
+        ExpectedAccountEnding = Get-AccountEnding (Get-ExpectedAccountNumber $update.Account)
         Portfolio = $update.Portfolio
         Ticker = $update.Ticker
         ContractLabel = $update.ContractLabel
@@ -274,6 +289,7 @@ $resolvedWorklist = foreach ($row in $worklist) {
         Action = $effectiveAction
         Account = $row.Account
         ExpectedAccountNumber = $row.ExpectedAccountNumber
+        ExpectedAccountEnding = $row.ExpectedAccountEnding
         Portfolio = $row.Portfolio
         Ticker = $row.Ticker
         ContractLabel = $row.ContractLabel
@@ -297,9 +313,31 @@ $updateLevelRows = @(Get-UpdateLevelRows $resolvedWorklist)
 $exceptionsCsv = Join-Path $OutDir "swing-oco-exceptions-review-$stamp.csv"
 $updatesCsv = Join-Path $OutDir "swing-oco-update-queue-$stamp.csv"
 $updateLevelsCsv = Join-Path $OutDir "swing-oco-update-levels-$stamp.csv"
-$exceptionRows | Select-Object Account,Portfolio,Ticker,ContractLabel,Direction,Quantity,Stop,T1,T2,Priority,Action,Status,ExceptionDecision,Detail | Export-Csv -LiteralPath $exceptionsCsv -NoTypeInformation
-$updateRows | Select-Object Account,Portfolio,Ticker,ContractLabel,Direction,Quantity,Stop,T1,T2,Priority,Action,Status,ExceptionDecision,Detail | Export-Csv -LiteralPath $updatesCsv -NoTypeInformation
+$exceptionRows | Select-Object Account,ExpectedAccountNumber,ExpectedAccountEnding,Portfolio,Ticker,ContractLabel,Direction,Quantity,Stop,T1,T2,Priority,Action,Status,ExceptionDecision,Detail | Export-Csv -LiteralPath $exceptionsCsv -NoTypeInformation
+$updateRows | Select-Object Account,ExpectedAccountNumber,ExpectedAccountEnding,Portfolio,Ticker,ContractLabel,Direction,Quantity,Stop,T1,T2,Priority,Action,Status,ExceptionDecision,Detail | Export-Csv -LiteralPath $updatesCsv -NoTypeInformation
 $updateLevelRows | Export-Csv -LiteralPath $updateLevelsCsv -NoTypeInformation
+
+$desktopOcoBatchPlanJson = ""
+if ([string]::IsNullOrWhiteSpace($TosVisibleOrdersPath)) {
+    $latestVisible = Get-ChildItem -LiteralPath $OutDir -Filter "tos-visible-working-orders-*.csv" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if ($latestVisible) { $TosVisibleOrdersPath = $latestVisible.FullName }
+}
+if (-not [string]::IsNullOrWhiteSpace($TosVisibleOrdersPath) -and -not [string]::IsNullOrWhiteSpace($TosReconciliationPath)) {
+    $batchScript = Get-ScriptPath "tools\New-TosOcoUpdateBatchPlan.ps1"
+    if (Test-Path -LiteralPath $batchScript) {
+        $desktopOcoBatchPlanJson = Join-Path $OutDir "tos-oco-desktop-update-batch-$stamp.json"
+        $batchArgs = @{
+            VisibleOrdersCsv = $TosVisibleOrdersPath
+            ReconciliationCsv = $TosReconciliationPath
+            OutFile = $desktopOcoBatchPlanJson
+        }
+        if (-not [string]::IsNullOrWhiteSpace($TosSnapshotJson)) { $batchArgs.SnapshotJson = $TosSnapshotJson }
+        if (-not [string]::IsNullOrWhiteSpace($TargetAccount)) { $batchArgs.TargetAccount = $TargetAccount }
+        & $batchScript @batchArgs | Out-Null
+    }
+}
 
 if ($exceptionRows.Count -gt 0) {
     $registryDir = Split-Path -Parent $ExceptionRegistryPath
@@ -369,10 +407,11 @@ $md.Add("## Review Files")
 $md.Add("- Missing/locate exceptions: ``$exceptionsCsv``")
 $md.Add("- OCO update queue: ``$updatesCsv``")
 $md.Add("- Individual OCO level updates: ``$updateLevelsCsv``")
+if ($desktopOcoBatchPlanJson) { $md.Add("- Desktop OCO batch plan: ``$desktopOcoBatchPlanJson``") }
 $md.Add("- Exception registry: ``$ExceptionRegistryPath``")
 $md.Add("")
 $md.Add("## Prioritized Worklist")
-$md.Add(($sortedWorklist | Select-Object Priority,Action,Account,Portfolio,Ticker,ContractLabel,Direction,Trigger,Stop,T1,T2,Quantity,Status,ExceptionDecision,Detail | Format-Table -AutoSize | Out-String -Width 340).TrimEnd())
+$md.Add(($sortedWorklist | Select-Object Priority,Action,Account,ExpectedAccountNumber,ExpectedAccountEnding,Portfolio,Ticker,ContractLabel,Direction,Trigger,Stop,T1,T2,Quantity,Status,ExceptionDecision,Detail | Format-Table -AutoSize | Out-String -Width 340).TrimEnd())
 
 Set-Content -LiteralPath $worklistMd -Value ($md -join [Environment]::NewLine) -Encoding UTF8
 
@@ -382,6 +421,7 @@ Set-Content -LiteralPath $worklistMd -Value ($md -join [Environment]::NewLine) -
     ExceptionsReviewCsv = (Resolve-Path -LiteralPath $exceptionsCsv).Path
     OcoUpdateQueueCsv = (Resolve-Path -LiteralPath $updatesCsv).Path
     OcoUpdateLevelsCsv = (Resolve-Path -LiteralPath $updateLevelsCsv).Path
+    DesktopOcoBatchPlanJson = if ($desktopOcoBatchPlanJson -and (Test-Path -LiteralPath $desktopOcoBatchPlanJson)) { (Resolve-Path -LiteralPath $desktopOcoBatchPlanJson).Path } else { "" }
     ExceptionRegistry = if (Test-Path -LiteralPath $ExceptionRegistryPath) { (Resolve-Path -LiteralPath $ExceptionRegistryPath).Path } else { "" }
     ActionQueue = $queueResult.CsvPath
     SchwabApiReconciliation = $schwabResult.ReconciliationPath

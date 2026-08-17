@@ -230,6 +230,13 @@ tr:last-child td {
   font-size: 13px;
 }
 
+.desktop-oco-head {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
 .oco-table {
   min-width: 1100px;
 }
@@ -357,4 +364,17 @@ tr:last-child td {
   .workflow-cards {
     grid-template-columns: 1fr 1fr;
   }
+}
+
+.workflow-inline-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.workflow-inline-actions button {
+  padding: 5px 7px;
+  font-size: 12px;
+  white-space: nowrap;
 }

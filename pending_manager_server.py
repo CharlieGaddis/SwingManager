@@ -201,6 +201,7 @@ def load_oco_review():
     reconciliation_path = latest_file("tos-oco-reconciliation-*.csv")
     update_path = latest_file("swing-oco-update-queue-*.csv")
     queue_path = latest_queue_path()
+    desktop_batch_path, desktop_batch = load_desktop_oco_batch()
     reconciliation = read_csv_rows(reconciliation_path)
     update_rows = read_csv_rows(update_path)
     json_updates = []
@@ -214,6 +215,16 @@ def load_oco_review():
         "reconciliationPath": str(reconciliation_path) if reconciliation_path else None,
         "updateQueuePath": str(update_path) if update_path else None,
         "actionQueuePath": str(queue_path) if queue_path else None,
+        "desktopBatchPath": str(desktop_batch_path) if desktop_batch_path else None,
+        "desktopBatch": {
+            "itemCount": desktop_batch.get("itemCount", 0),
+            "updateCount": desktop_batch.get("updateCount", 0),
+            "readyCount": desktop_batch.get("readyCount", 0),
+            "missingProtectionCount": desktop_batch.get("missingProtectionCount", 0),
+            "targetAccount": desktop_batch.get("targetAccount", {}),
+            "currentTosAccount": desktop_batch.get("currentTosAccount", {}),
+            "readyItems": desktop_oco_ready_items(desktop_batch),
+        },
         "counts": counts,
         "reconciliation": reconciliation,
         "updateQueue": update_rows,
@@ -225,10 +236,12 @@ def load_worklist_review():
     update_queue_path = latest_file("swing-oco-update-queue-*.csv")
     update_levels_path = latest_file("swing-oco-update-levels-*.csv")
     exceptions_path = latest_file("swing-oco-exceptions-review-*.csv")
+    desktop_batch_path = latest_file("tos-oco-desktop-update-batch-*.json")
     worklist = read_csv_rows(worklist_path)
     update_queue = read_csv_rows(update_queue_path)
     update_levels = read_csv_rows(update_levels_path)
     exceptions = read_csv_rows(exceptions_path)
+    desktop_batch = load_json(desktop_batch_path, {}) if desktop_batch_path else {}
     counts = {}
     for row in worklist:
         priority = row.get("Priority") or "UNKNOWN"
@@ -240,6 +253,11 @@ def load_worklist_review():
         "updateQueuePath": str(update_queue_path) if update_queue_path else None,
         "updateLevelsPath": str(update_levels_path) if update_levels_path else None,
         "exceptionsPath": str(exceptions_path) if exceptions_path else None,
+        "desktopBatchPath": str(desktop_batch_path) if desktop_batch_path else None,
+        "desktopBatchItemCount": desktop_batch.get("itemCount", 0),
+        "desktopBatchUpdateCount": desktop_batch.get("updateCount", 0),
+        "desktopBatchReadyCount": desktop_batch.get("readyCount", 0),
+        "desktopBatchMissingProtectionCount": desktop_batch.get("missingProtectionCount", 0),
         "counts": counts,
         "blockingCount": len(blocking),
         "updateQueueCount": len(update_queue),
@@ -269,6 +287,11 @@ def workflow_status():
         "worklistBlockingCount": worklist.get("blockingCount", 0),
         "ocoUpdateLevelCount": worklist.get("updateLevelCount", 0),
         "ocoUpdateLevelsPath": worklist.get("updateLevelsPath"),
+        "desktopOcoBatchPath": worklist.get("desktopBatchPath"),
+        "desktopOcoBatchItemCount": worklist.get("desktopBatchItemCount", 0),
+        "desktopOcoBatchUpdateCount": worklist.get("desktopBatchUpdateCount", 0),
+        "desktopOcoBatchReadyCount": worklist.get("desktopBatchReadyCount", 0),
+        "desktopOcoBatchMissingProtectionCount": worklist.get("desktopBatchMissingProtectionCount", 0),
     })
     return base
 
@@ -319,7 +342,7 @@ def previous_json_for(source_path: Path):
     return path if path.exists() else None
 
 
-def run_nightly_reconciliation(source_path: Path):
+def run_nightly_reconciliation(source_path: Path, target_account="", tos_reconciliation_path="", tos_visible_orders_path="", tos_snapshot_json=""):
     script = ROOT / "Invoke-SwingNightlyReconciliation.ps1"
     if not script.exists():
         raise FileNotFoundError(f"Missing nightly reconciliation script: {script}")
@@ -340,9 +363,15 @@ def run_nightly_reconciliation(source_path: Path):
     previous = previous_json_for(source_path)
     if previous:
         command.extend(["-PreviousPath", str(previous)])
-    tos = latest_file("tos-oco-reconciliation-*.csv")
+    tos = Path(tos_reconciliation_path) if tos_reconciliation_path else latest_file("tos-oco-reconciliation-*.csv")
     if tos:
         command.extend(["-TosReconciliationPath", str(tos)])
+    if tos_visible_orders_path:
+        command.extend(["-TosVisibleOrdersPath", str(tos_visible_orders_path)])
+    if tos_snapshot_json:
+        command.extend(["-TosSnapshotJson", str(tos_snapshot_json)])
+    if target_account:
+        command.extend(["-TargetAccount", str(target_account)])
     started = utc_now()
     result = subprocess.run(command, cwd=str(ROOT), text=True, capture_output=True, timeout=180)
     status = {
@@ -360,6 +389,171 @@ def run_nightly_reconciliation(source_path: Path):
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Nightly reconciliation failed.")
     return workflow_status()
 
+
+def load_desktop_oco_batch():
+    path = latest_file("tos-oco-desktop-update-batch-*.json")
+    if not path:
+        return None, {}
+    return path, load_json(path, {})
+
+
+def desktop_oco_ready_items(batch):
+    items = batch.get("items") or []
+    ready = []
+    for item in items:
+        status = str(item.get("SnapshotStatus") or "").strip().upper()
+        if status in {"CANCELED", "FILLED"}:
+            continue
+        if item.get("Action") == "update_condition_threshold" and item.get("ReadyForDesktopAutomation") is True and item.get("AccountVerified") is True:
+            ready.append(item)
+    return ready
+
+
+def run_desktop_oco_batch_plan(body):
+    script = ROOT / "tools" / "Invoke-TosOcoDesktopBatch.ps1"
+    if not script.exists():
+        raise FileNotFoundError(f"Missing desktop OCO batch runner: {script}")
+    batch_path = body.get("batchPath") or workflow_status().get("desktopOcoBatchPath")
+    if not batch_path:
+        raise RuntimeError("No desktop OCO batch plan is available. Build the OCO worklist first.")
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-BatchPath",
+        str(batch_path),
+        "-Mode",
+        "Plan",
+    ]
+    for body_key, switch_name in (("symbol", "-Symbol"), ("phase", "-Phase"), ("ocoId", "-OcoId"), ("replacingOrderId", "-ReplacingOrderId")):
+        value = str(body.get(body_key) or "").strip()
+        if value:
+            command.extend([switch_name, value])
+    started = utc_now()
+    result = subprocess.run(command, cwd=str(ROOT), text=True, capture_output=True, timeout=60)
+    status = {
+        "lastDesktopOcoPlanStartedAt": started,
+        "lastDesktopOcoPlanFinishedAt": utc_now(),
+        "lastDesktopOcoPlanOk": result.returncode == 0,
+        "lastDesktopOcoPlanCommand": " ".join(command),
+        "lastDesktopOcoPlanStdout": result.stdout[-6000:],
+        "lastDesktopOcoPlanStderr": result.stderr[-6000:],
+        "lastDesktopOcoPlanError": "",
+    }
+    save_workflow_status(status)
+    parsed = None
+    try:
+        parsed = parse_json_from_process_output(result.stdout)
+    except Exception:
+        parsed = None
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "Desktop OCO plan failed."
+        save_workflow_status({"lastDesktopOcoPlanOk": False, "lastDesktopOcoPlanError": message})
+        raise RuntimeError(message)
+    return parsed or {"ok": True, "stdout": result.stdout}
+
+
+def run_desktop_oco_workflow(body):
+    script = ROOT / "tools" / "Invoke-TosOcoDesktopWorkflow.ps1"
+    if not script.exists():
+        raise FileNotFoundError(f"Missing desktop OCO workflow runner: {script}")
+    batch_path = body.get("batchPath") or workflow_status().get("desktopOcoBatchPath")
+    if not batch_path:
+        raise RuntimeError("No desktop OCO batch is available. Build the OCO worklist first.")
+    stage = str(body.get("stage") or "RunToConfirmation")
+    allowed_stages = {"Plan", "OpenCancelReplace", "SetThreshold", "OpenConfirmation", "VerifyConfirmation", "FinalSend", "RunToConfirmation", "RunToFinalSend"}
+    if stage not in allowed_stages:
+        raise RuntimeError(f"Unsupported desktop OCO workflow stage: {stage}")
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-BatchPath",
+        str(batch_path),
+        "-Stage",
+        stage,
+    ]
+    for body_key, switch_name in (("symbol", "-Symbol"), ("phase", "-Phase"), ("ocoId", "-OcoId"), ("replacingOrderId", "-ReplacingOrderId")):
+        value = str(body.get(body_key) or "").strip()
+        if value:
+            command.extend([switch_name, value])
+    if body.get("allowInput") or stage in {"OpenCancelReplace", "SetThreshold", "OpenConfirmation", "FinalSend", "RunToConfirmation", "RunToFinalSend"}:
+        command.append("-AllowInput")
+    if body.get("allowFinalSend"):
+        command.append("-AllowFinalSend")
+    started = utc_now()
+    result = subprocess.run(command, cwd=str(ROOT), text=True, capture_output=True, timeout=240)
+    status = {
+        "lastDesktopOcoWorkflowStartedAt": started,
+        "lastDesktopOcoWorkflowFinishedAt": utc_now(),
+        "lastDesktopOcoWorkflowOk": result.returncode == 0,
+        "lastDesktopOcoWorkflowStage": stage,
+        "lastDesktopOcoWorkflowCommand": " ".join(command),
+        "lastDesktopOcoWorkflowStdout": result.stdout[-9000:],
+        "lastDesktopOcoWorkflowStderr": result.stderr[-9000:],
+        "lastDesktopOcoWorkflowError": "",
+    }
+    save_workflow_status(status)
+    parsed = None
+    try:
+        parsed = parse_json_from_process_output(result.stdout)
+    except Exception:
+        parsed = None
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "Desktop OCO workflow failed."
+        save_workflow_status({"lastDesktopOcoWorkflowOk": False, "lastDesktopOcoWorkflowError": message})
+        raise RuntimeError(message)
+    return parsed or {"ok": True, "stdout": result.stdout}
+
+
+def refresh_current_tos_batch():
+    status = workflow_status()
+    source = status.get("lastUploadPath") or status.get("sourceJson")
+    if not source:
+        return None
+    source_path = Path(source)
+    run_nightly_update(source_path, capture_tos=True)
+    return run_nightly_reconciliation(source_path)
+
+
+def run_next_desktop_oco_workflow(body):
+    batch_path, batch = load_desktop_oco_batch()
+    if not batch_path:
+        raise RuntimeError("No desktop OCO batch is available. Build the OCO worklist first.")
+    ready = desktop_oco_ready_items(batch)
+    if not ready:
+        return {"success": True, "message": "No ready desktop OCO updates.", "remainingReadyCount": 0}
+    item = ready[0]
+    target_account = item.get("TargetAccountAlias") or item.get("CurrentTosAccountAlias") or ""
+    payload = {
+        "batchPath": str(batch_path),
+        "symbol": item.get("Symbol", ""),
+        "phase": item.get("Phase", ""),
+        "ocoId": item.get("OcoId", ""),
+        "replacingOrderId": item.get("ReplacingOrderId", ""),
+        "stage": body.get("stage") or "RunToConfirmation",
+        "allowInput": True,
+        "allowFinalSend": bool(body.get("allowFinalSend")),
+    }
+    result = run_desktop_oco_workflow(payload)
+    refreshed = None
+    if payload["stage"] == "RunToFinalSend" and bool(result.get("success", True)):
+        if target_account in {"IRA", "Living Trust"}:
+            refreshed = prepare_tos_account_batch({"account": target_account})
+        else:
+            refreshed = refresh_current_tos_batch()
+    return {
+        "selected": payload,
+        "result": result,
+        "refreshed": refreshed is not None,
+        "success": bool(result.get("success", True)),
+    }
 def run_nightly_update(source_path: Path, capture_tos=False):
     script = ROOT / "Update-SwingManagerNightly.ps1"
     if not script.exists():
@@ -395,6 +589,153 @@ def run_nightly_update(source_path: Path, capture_tos=False):
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Nightly update failed.")
     return workflow_status()
+
+
+def run_tos_account_switch(target_account):
+    if target_account not in {"IRA", "Living Trust"}:
+        raise RuntimeError(f"Unsupported TOS target account: {target_account}")
+    script = ROOT / "tools" / "Switch-TosAccount.ps1"
+    if not script.exists():
+        raise FileNotFoundError(f"Missing TOS account switch script: {script}")
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-TargetAccount",
+        target_account,
+        "-AllowInput",
+    ]
+    started = utc_now()
+    result = subprocess.run(command, cwd=str(ROOT), text=True, capture_output=True, timeout=120)
+    save_workflow_status({
+        "lastTosAccountSwitchStartedAt": started,
+        "lastTosAccountSwitchFinishedAt": utc_now(),
+        "lastTosAccountSwitchOk": result.returncode == 0,
+        "lastTosAccountSwitchTarget": target_account,
+        "lastTosAccountSwitchCommand": " ".join(command),
+        "lastTosAccountSwitchStdout": result.stdout[-6000:],
+        "lastTosAccountSwitchStderr": result.stderr[-6000:],
+        "lastTosAccountSwitchError": "",
+    })
+    parsed = None
+    try:
+        parsed = parse_json_from_process_output(result.stdout)
+    except Exception:
+        parsed = None
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or f"TOS account switch to {target_account} failed."
+        save_workflow_status({"lastTosAccountSwitchOk": False, "lastTosAccountSwitchError": message})
+        raise RuntimeError(message)
+    return parsed or {"ok": True, "stdout": result.stdout}
+
+
+def capture_tos_snapshot(label):
+    script = ROOT / "tools" / "New-TosAutomationSnapshot.ps1"
+    if not script.exists():
+        raise FileNotFoundError(f"Missing TOS snapshot script: {script}")
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-") or "snapshot"
+    discovery = ROOT / "TosAutomation" / "Discovery"
+    started = time.time()
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-WindowTitle",
+        "Main@thinkorswim",
+        "-Label",
+        safe_label,
+        "-MaxDepth",
+        "45",
+        "-MaxChildrenPerNode",
+        "1200",
+    ]
+    result = subprocess.run(command, cwd=str(ROOT), text=True, capture_output=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "TOS snapshot failed.")
+    candidates = sorted(
+        discovery.glob(f"tos-{safe_label}-*-tree.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    snapshot_json = next((p for p in candidates if p.stat().st_mtime >= started - 2), candidates[0] if candidates else None)
+    if not snapshot_json:
+        raise RuntimeError(f"TOS snapshot did not produce a JSON tree for label {safe_label}.")
+    tree_path = Path(str(snapshot_json).replace("-tree.json", "-tree.txt"))
+    if not tree_path.exists():
+        raise RuntimeError(f"TOS snapshot JSON was found but tree text is missing: {tree_path}")
+    return {"json": snapshot_json, "tree": tree_path, "stdout": result.stdout}
+
+
+def extract_tos_working_orders(tree_path, action_queue_path):
+    script = ROOT / "Extract-TosWorkingOrdersFromTree.ps1"
+    if not script.exists():
+        raise FileNotFoundError(f"Missing TOS working-order extractor: {script}")
+    started = time.time()
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-TreePath",
+        str(tree_path),
+        "-ActionQueuePath",
+        str(action_queue_path),
+        "-OutDir",
+        str(ANALYSIS),
+    ]
+    result = subprocess.run(command, cwd=str(ROOT), text=True, capture_output=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "TOS working-order extraction failed.")
+    visible = sorted(ANALYSIS.glob("tos-visible-working-orders-*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    recon = sorted(ANALYSIS.glob("tos-oco-reconciliation-*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    visible_path = next((p for p in visible if p.stat().st_mtime >= started - 2), visible[0] if visible else None)
+    recon_path = next((p for p in recon if p.stat().st_mtime >= started - 2), recon[0] if recon else None)
+    if not visible_path or not recon_path:
+        raise RuntimeError("TOS extraction did not produce visible-order and reconciliation CSV files.")
+    return {"visible": visible_path, "reconciliation": recon_path, "stdout": result.stdout}
+
+
+def prepare_tos_account_batch(body):
+    account = str(body.get("account") or "").strip()
+    if account not in {"IRA", "Living Trust"}:
+        raise RuntimeError("account must be IRA or Living Trust.")
+    source = body.get("sourcePath") or workflow_status().get("lastUploadPath") or workflow_status().get("sourceJson")
+    if not source:
+        raise RuntimeError("Upload a JSON file before preparing an account-scoped TOS batch.")
+    source_path = Path(source)
+    if not latest_queue_path():
+        run_nightly_update(source_path, capture_tos=False)
+    queue_path = latest_queue_path()
+    if not queue_path:
+        raise RuntimeError("No action queue is available after building the nightly update.")
+    switch_result = run_tos_account_switch(account)
+    snapshot = capture_tos_snapshot(f"AccountScopedOco-{account}")
+    extracted = extract_tos_working_orders(snapshot["tree"], queue_path)
+    status = run_nightly_reconciliation(
+        source_path,
+        target_account=account,
+        tos_reconciliation_path=str(extracted["reconciliation"]),
+        tos_visible_orders_path=str(extracted["visible"]),
+        tos_snapshot_json=str(snapshot["json"]),
+    )
+    return {
+        "success": True,
+        "account": account,
+        "switch": switch_result,
+        "snapshotJson": str(snapshot["json"]),
+        "snapshotTree": str(snapshot["tree"]),
+        "visibleOrdersPath": str(extracted["visible"]),
+        "tosReconciliationPath": str(extracted["reconciliation"]),
+        "status": status,
+    }
 def load_pending_rows():
     path = latest_queue_path()
     if path is None:
@@ -638,6 +979,7 @@ def monitor_loop():
                     append_event(ident, "info", "Paper order staged; live submit is disabled by executionMode.", row["orderPlan"])
                 else:
                     try:
+                        live_preflight()
                         submit = submit_live_order(row, "initial")
                         local["status"] = "live_working" if submit.get("readbackConfirmed") else "live_submitted_unconfirmed"
                         local["schwabOrderId"] = submit.get("orderId", "")
@@ -755,8 +1097,75 @@ def broker_order_leg_symbols(order):
     return symbols
 
 
+def row_account_number(row):
+    account = str(row.get("Account") or "")
+    if account == "IRA":
+        return "5682"
+    if account == "Living Trust":
+        return "9157"
+    return ""
+
+
+def order_account_matches_row(order, row):
+    expected = row_account_number(row)
+    if not expected:
+        return True
+    actual = str(order.get("accountNumber") or "")
+    return actual.endswith(expected[-4:]) if actual else False
+
+
+def parse_contract_label_parts(label):
+    match = re.match(r"^([0-9.]+(?:/[0-9.]+)*)\s*([CP])\s+(\d{2})-(\d{2})$", str(label or "").strip(), re.I)
+    if not match:
+        return None
+    year = dt.datetime.now().year % 100
+    strikes = {round(float(value), 3) for value in match.group(1).split("/")}
+    right = "CALL" if match.group(2).upper() == "C" else "PUT"
+    exp = f"{year:02d}{match.group(3)}{match.group(4)}"
+    return {"strikes": strikes, "right": right, "exp": exp}
+
+
+def option_leg_signature(leg):
+    instrument = leg.get("instrument") if isinstance(leg, dict) else {}
+    if not isinstance(instrument, dict):
+        return None
+    right = str(instrument.get("putCall") or "").upper()
+    symbol = str(instrument.get("symbol") or instrument.get("uniformSymbol") or "").upper().replace(" ", "")
+    match = re.search(r"(\d{6})([CP])(\d{8})$", symbol)
+    if not match:
+        return None
+    exp = match.group(1)
+    if not right:
+        right = "CALL" if match.group(2) == "C" else "PUT"
+    strike = round(int(match.group(3)) / 1000.0, 3)
+    underlying = str(instrument.get("underlyingSymbol") or "").upper()
+    return {"underlying": underlying, "right": right, "exp": exp, "strike": strike}
+
+
+def broker_option_order_matches_row(order, row):
+    expected = parse_contract_label_parts(row.get("ContractLabel"))
+    if not expected:
+        return False
+    ticker = str(row.get("Ticker") or "").upper()
+    signatures = []
+    for leg in order.get("orderLegCollection") or []:
+        sig = option_leg_signature(leg)
+        if sig:
+            signatures.append(sig)
+    if not signatures:
+        return False
+    if any(sig["underlying"] and sig["underlying"] != ticker for sig in signatures):
+        return False
+    if any(sig["right"] != expected["right"] or sig["exp"] != expected["exp"] for sig in signatures):
+        return False
+    strikes = {sig["strike"] for sig in signatures}
+    return strikes == expected["strikes"]
+
+
 def broker_order_matches_row(order, row):
     if not active_broker_status(order.get("status")):
+        return False
+    if not order_account_matches_row(order, row):
         return False
     ticker = str(row.get("Ticker") or "").upper()
     if not ticker:
@@ -768,7 +1177,7 @@ def broker_order_matches_row(order, row):
     if asset_type == "stock":
         return ticker in symbols
     if asset_type == "option":
-        return any(symbol.startswith(ticker + " ") or symbol.startswith("." + ticker) or ticker in symbol for symbol in symbols)
+        return broker_option_order_matches_row(order, row)
     return False
 
 
@@ -954,12 +1363,21 @@ def stop_monitor():
 
 
 def live_preflight():
+    cfg = config()
     issues = []
+    warnings = []
     if not SUBMIT_PROJECT.exists():
         issues.append(f"Submit helper missing: {SUBMIT_PROJECT}")
     base = config().get("tradingDashboardBaseUrl", "http://127.0.0.1:5080").rstrip("/")
+    token_expires = None
+    token_required_through = None
     try:
-        with urllib.request.urlopen(base + "/api/schwab/status", timeout=8) as response:
+        refresh_request = urllib.request.Request(
+            base + "/api/schwab/refresh-token",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST")
+        with urllib.request.urlopen(refresh_request, timeout=12) as response:
             status = json.loads(response.read().decode("utf-8"))
         if not status.get("configured"):
             issues.append("Schwab is not configured in TradingDashboard.")
@@ -967,31 +1385,51 @@ def live_preflight():
             issues.append("Schwab is not connected in TradingDashboard.")
         if status.get("accessTokenExpired"):
             issues.append("Schwab access token is expired.")
+        token_expires = parse_utc(status.get("accessTokenExpiresUtc"))
+        min_valid_minutes = int(cfg.get("liveTokenMinValidMinutes", 20))
+        token_required_through = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=min_valid_minutes)
+        if token_expires and token_expires < token_required_through:
+            issues.append(
+                "Schwab access token could not be refreshed far enough for live entry: "
+                f"expires={token_expires.isoformat()}, requiredThrough={token_required_through.isoformat()}"
+            )
         if not status.get("orderCapability"):
             issues.append("TradingDashboard Schwab order capability is not enabled.")
     except Exception as exc:
-        issues.append(f"Could not read Schwab status: {exc}")
+        issues.append(f"Could not refresh/read Schwab status: {exc}")
     try:
         with urllib.request.urlopen(base + "/api/schwab/account-numbers", timeout=8) as response:
             accounts = json.loads(response.read().decode("utf-8"))
         text = json.dumps(accounts)
-        if "68885682" not in text:
+        if "5682" not in text:
             issues.append("IRA account ending 5682 was not found.")
-        if "86119157" not in text:
+        if "9157" not in text:
             issues.append("Living Trust account ending 9157 was not found.")
     except Exception as exc:
         issues.append(f"Could not resolve Schwab account numbers: {exc}")
     worklist = load_worklist_review()
+    manual_oco_mode = bool(cfg.get("allowLiveEntriesWithManualOco", False))
     if not worklist.get("worklistPath"):
-        issues.append("OCO/stop worklist has not been built from the latest JSON/preflight.")
+        message = "OCO/stop worklist has not been built from the latest JSON/preflight."
+        if manual_oco_mode:
+            warnings.append(message)
+        else:
+            issues.append(message)
     elif int(worklist.get("blockingCount") or 0) > 0:
-        issues.append(f"OCO/stop worklist has {worklist.get('blockingCount')} unresolved protection rows.")
-    cfg = config()
+        message = f"OCO/stop worklist has {worklist.get('blockingCount')} unresolved protection rows."
+        if manual_oco_mode:
+            warnings.append(message + " New entries may be submitted, but protective OCO follow-up is manual.")
+        else:
+            issues.append(message)
     runtime["last_live_preflight"] = {
         "checkedAt": utc_now(),
         "ok": not issues,
         "issues": issues,
+        "warnings": warnings,
         "executionMode": cfg.get("executionMode", "paper"),
+        "manualOcoMode": manual_oco_mode,
+        "tokenExpiresUtc": status.get("accessTokenExpiresUtc") if "status" in locals() else "",
+        "tokenRequiredThroughUtc": token_required_through.isoformat() if token_required_through else "",
         "cancelReplaceLadder": bool(cfg.get("enableCancelReplaceLadder", False)),
         "bidPhaseSeconds": int(cfg.get("bidPhaseSeconds", 60)),
     }
@@ -1065,6 +1503,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(workflow_status())
         if parsed.path == "/api/oco":
             return self.send_json(load_oco_review())
+        if parsed.path == "/api/oco/desktop-batch":
+            path, batch = load_desktop_oco_batch()
+            return self.send_json({"path": str(path) if path else None, "batch": batch})
         return self.send_json({"error": "not found"}, status=404)
 
     def do_POST(self):
@@ -1120,6 +1561,34 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "status": status})
             except Exception as exc:
                 save_workflow_status({"lastReconcileOk": False, "lastReconcileError": str(exc)})
+                return self.send_json({"ok": False, "error": str(exc), "status": workflow_status()}, status=500)
+        if parsed.path == "/api/oco/desktop-batch/plan":
+            try:
+                body = self.read_json()
+                plan = run_desktop_oco_batch_plan(body)
+                return self.send_json({"ok": True, "plan": plan, "status": workflow_status()})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc), "status": workflow_status()}, status=500)
+        if parsed.path == "/api/oco/desktop-workflow":
+            try:
+                body = self.read_json()
+                result = run_desktop_oco_workflow(body)
+                return self.send_json({"ok": True, "result": result, "status": workflow_status()})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc), "status": workflow_status()}, status=500)
+        if parsed.path == "/api/oco/desktop-workflow/next":
+            try:
+                body = self.read_json()
+                result = run_next_desktop_oco_workflow(body)
+                return self.send_json({"ok": True, "result": result, "status": workflow_status()})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc), "status": workflow_status()}, status=500)
+        if parsed.path == "/api/oco/prepare-account":
+            try:
+                body = self.read_json()
+                result = prepare_tos_account_batch(body)
+                return self.send_json({"ok": True, "result": result, "status": workflow_status()})
+            except Exception as exc:
                 return self.send_json({"ok": False, "error": str(exc), "status": workflow_status()}, status=500)
         if parsed.path == "/api/monitor/start":
             try:
