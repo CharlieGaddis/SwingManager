@@ -90,7 +90,7 @@ The monitor now has a safer live baseline:
 
 - Paper dry-run rows no longer permanently block a later live submit.
 - A real Schwab order id is the primary duplicate lock.
-- Live entries are guarded by `Config\pending-manager.json` and currently allow `09:30-16:30 America/New_York`, weekdays only.
+- Live entries are guarded by `Config\pending-manager.json` and currently allow `09:30-16:00 America/New_York`, weekdays only.
 - Live monitor start performs Schwab preflight:
   - TradingDashboard reachable.
   - Schwab configured.
