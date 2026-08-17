@@ -13,8 +13,8 @@
     "stockMaxCapital":  5000.0,
     "liveEntryWindow":  {
                             "timezone":  "America/New_York",
-                            "start":  "09:35",
-                            "end":  "15:30",
+                            "start":  "09:30",
+                            "end":  "16:30",
                             "weekdaysOnly":  true
                         },
     "accounts":  {
