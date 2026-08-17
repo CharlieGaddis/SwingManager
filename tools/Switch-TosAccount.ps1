@@ -25,6 +25,7 @@ function Normalize-TosAccountAlias {
     param([string]$Alias)
     $text = ([string]$Alias).Trim()
     if ([string]::IsNullOrWhiteSpace($text)) { return "" }
+    if ($text -match '(?i)<TOTAL>|ALL ACCOUNTS') { return "All Accounts" }
     if ($text -match '(?i)\bIRA\b|Rollover IRA') { return "IRA" }
     if ($text -match '(?i)Living Trust') { return "Living Trust" }
     return $text
@@ -56,7 +57,7 @@ function Get-CurrentAccount {
     param([object[]]$Nodes)
     $node = @($Nodes | Where-Object {
         $_.role -eq 'label' -and
-        $_.name -match '^(?<number>\d{8}|ACCOUNT_REDACTED)SCHW\s+\((?<alias>[^)]+)\)' -and
+        $_.name -match '^(?:(?<number>\d{8}|ACCOUNT_REDACTED)|<TOTAL>)SCHW\s+\((?<alias>[^)]+)\)' -and
         $_.states -match 'showing' -and
         [int]$_.bounds.x -ge 0 -and
         [int]$_.bounds.y -ge 0
@@ -66,9 +67,11 @@ function Get-CurrentAccount {
         return [pscustomobject]@{ Alias = ""; Ending = ""; Label = ""; Node = $null }
     }
 
-    $match = [regex]::Match([string]$node.name, '^(?<number>\d{8}|ACCOUNT_REDACTED)SCHW\s+\((?<alias>[^)]+)\)')
+    $match = [regex]::Match([string]$node.name, '^(?:(?<number>\d{8}|ACCOUNT_REDACTED)|<TOTAL>)SCHW\s+\((?<alias>[^)]+)\)')
     $alias = Normalize-TosAccountAlias $match.Groups['alias'].Value
-    $ending = if ($match.Groups['number'].Value -eq 'ACCOUNT_REDACTED') {
+    $ending = if (-not $match.Groups['number'].Success) {
+        ""
+    } elseif ($match.Groups['number'].Value -eq 'ACCOUNT_REDACTED') {
         Get-ExpectedAccountEnding $alias
     } else {
         $match.Groups['number'].Value.Substring($match.Groups['number'].Value.Length - 4)
@@ -117,8 +120,22 @@ function Find-AccountToggle {
 function Find-TargetAccountChoice {
     param([object[]]$Nodes, [string]$Wanted)
     $wantedAlias = Normalize-TosAccountAlias $Wanted
+    $labels = @($Nodes | Where-Object {
+        $_.role -eq "label" -and
+        $_.path -like "0.0.1.0.0.0.0.0.*" -and
+        (Normalize-TosAccountAlias ([string]$_.name)) -eq $wantedAlias
+    } | Sort-Object id)
+
+    foreach ($label in $labels) {
+        $parent = $Nodes | Where-Object { $_.id -eq $label.parentId } | Select-Object -First 1
+        if ($parent -and $parent.states -match "selectable" -and [int]$parent.bounds.width -gt 0 -and [int]$parent.bounds.height -gt 0) {
+            return $parent
+        }
+    }
+
     return @($Nodes | Where-Object {
-        $_.role -in @("label", "list item", "menu item", "text") -and
+        $_.role -in @("list item", "menu item", "text") -and
+        $_.path -like "0.0.1.0.0.0.0.0.*" -and
         $_.states -match "showing" -and
         [int]$_.bounds.width -gt 0 -and
         [int]$_.bounds.height -gt 0 -and
