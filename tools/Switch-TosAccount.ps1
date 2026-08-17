@@ -85,6 +85,19 @@ function Invoke-JabAction {
     return [pscustomobject]@{ name = $Name; output = ($output | Out-String).Trim(); exitCode = $LASTEXITCODE }
 }
 
+function Invoke-NativeClickNode {
+    param([string]$Name, [object]$Node)
+    if (-not $AllowInput) { throw "$Name requires -AllowInput." }
+    if (-not $Node -or [int]$Node.bounds.width -le 0 -or [int]$Node.bounds.height -le 0) {
+        throw "$Name cannot use native click because node bounds are not visible."
+    }
+    $nativeScript = Join-Path $scriptDir "Invoke-TosNativeInput.ps1"
+    $x = [int]$Node.bounds.x + [Math]::Floor([int]$Node.bounds.width / 2)
+    $y = [int]$Node.bounds.y + [Math]::Floor([int]$Node.bounds.height / 2)
+    $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $nativeScript -Action Click -X $x -Y $y -AllowInput
+    return [pscustomobject]@{ name = $Name; method = "NativeClick"; x = $x; y = $y; output = ($output | Out-String).Trim(); exitCode = $LASTEXITCODE }
+}
+
 function Find-AccountToggle {
     param([object[]]$Nodes, [object]$AccountNode)
     if (-not $AccountNode) { return $null }
@@ -105,11 +118,47 @@ function Find-TargetAccountChoice {
     param([object[]]$Nodes, [string]$Wanted)
     $wantedAlias = Normalize-TosAccountAlias $Wanted
     return @($Nodes | Where-Object {
-        $_.role -eq "label" -and
-        $_.states -match "selectable" -and
-        $_.name -match "ACCOUNT_REDACTED|\d{8}" -and
+        $_.role -in @("label", "list item", "menu item", "text") -and
+        $_.states -match "showing" -and
+        [int]$_.bounds.width -gt 0 -and
+        [int]$_.bounds.height -gt 0 -and
         (Normalize-TosAccountAlias ([string]$_.name)) -eq $wantedAlias
-    } | Sort-Object id) | Select-Object -First 1
+    } | Sort-Object @{ Expression = { [int]$_.bounds.y } }, @{ Expression = { [int]$_.bounds.x } }) | Select-Object -First 1
+}
+
+function Find-TargetAccountChoiceByMenuGeometry {
+    param([object[]]$Nodes, [string]$Wanted)
+    $wantedAlias = Normalize-TosAccountAlias $Wanted
+    $rowIndex = switch ($wantedAlias) {
+        "IRA" { 1 }
+        "Living Trust" { 2 }
+        default { -1 }
+    }
+    if ($rowIndex -lt 0) { return $null }
+
+    $lists = @($Nodes | Where-Object {
+        $_.role -eq "list" -and
+        $_.states -match "showing" -and
+        [int]$_.bounds.width -ge 180 -and
+        [int]$_.bounds.width -le 320 -and
+        [int]$_.bounds.height -ge 80 -and
+        [int]$_.bounds.x -ge 350 -and
+        [int]$_.bounds.y -ge 120 -and
+        [int]$_.bounds.y -le 220
+    } | Sort-Object @{ Expression = { [int]$_.bounds.y } }, @{ Expression = { [int]$_.bounds.x } })
+    foreach ($list in $lists) {
+        $rows = @($Nodes | Where-Object {
+            $_.parentId -eq $list.id -and
+            $_.states -match "selectable" -and
+            $_.states -match "showing" -and
+            [int]$_.bounds.width -gt 0 -and
+            [int]$_.bounds.height -gt 0
+        } | Sort-Object @{ Expression = { [int]$_.bounds.y } }, @{ Expression = { [int]$_.bounds.x } })
+        if ($rows.Count -gt $rowIndex) {
+            return $rows[$rowIndex]
+        }
+    }
+    return $null
 }
 
 $steps = New-Object System.Collections.Generic.List[object]
@@ -131,17 +180,38 @@ try {
     if ($initialAccount.Alias -eq $targetAlias) {
         $verifiedAccount = $initialAccount
     } else {
-        $toggle = Find-AccountToggle -Nodes $initialNodes -AccountNode $initialAccount.Node
-        if (-not $toggle) { throw "Could not locate the top TOS account selector toggle." }
-        $steps.Add((Invoke-JabAction -Name "OpenAccountSelector" -Path ([string]$toggle.path) -ExpectedRole "toggle button")) | Out-Null
-        Start-Sleep -Milliseconds 1000
+        $targetChoice = Find-TargetAccountChoice -Nodes $initialNodes -Wanted $targetAlias
+        if (-not $targetChoice) {
+            $targetChoice = Find-TargetAccountChoiceByMenuGeometry -Nodes $initialNodes -Wanted $targetAlias
+        }
 
-        $dropdownSnapshot = New-SnapshotJson "AccountSwitchDropdown-$($targetAlias -replace '[^A-Za-z0-9_.-]+','-')"
-        $dropdownNodes = @((Get-Content -LiteralPath $dropdownSnapshot -Raw | ConvertFrom-Json).nodes)
-        $targetChoice = Find-TargetAccountChoice -Nodes $dropdownNodes -Wanted $targetAlias
+        if (-not $targetChoice) {
+            $toggle = Find-AccountToggle -Nodes $initialNodes -AccountNode $initialAccount.Node
+            if (-not $toggle) { throw "Could not locate the top TOS account selector toggle." }
+            $steps.Add((Invoke-NativeClickNode -Name "OpenAccountSelector-NativeClick" -Node $toggle)) | Out-Null
+            Start-Sleep -Milliseconds 1000
+
+            $dropdownSnapshot = New-SnapshotJson "AccountSwitchDropdown-$($targetAlias -replace '[^A-Za-z0-9_.-]+','-')"
+            $dropdownNodes = @((Get-Content -LiteralPath $dropdownSnapshot -Raw | ConvertFrom-Json).nodes)
+            $targetChoice = Find-TargetAccountChoice -Nodes $dropdownNodes -Wanted $targetAlias
+            if (-not $targetChoice) {
+                $targetChoice = Find-TargetAccountChoiceByMenuGeometry -Nodes $dropdownNodes -Wanted $targetAlias
+            }
+        } else {
+            $dropdownSnapshot = $initialSnapshot
+        }
+
         if (-not $targetChoice) { throw "Could not locate account choice for $targetAlias in the TOS account selector." }
         $steps.Add([pscustomobject]@{ name = "DropdownSnapshot"; snapshotJson = $dropdownSnapshot; targetChoicePath = $targetChoice.path; targetChoiceName = $targetChoice.name }) | Out-Null
-        $steps.Add((Invoke-JabAction -Name "ChooseAccount" -Path ([string]$targetChoice.path) -ExpectedRole "label")) | Out-Null
+        if ([string]::IsNullOrWhiteSpace([string]$targetChoice.name) -or $targetChoice.role -eq "panel") {
+            $steps.Add((Invoke-NativeClickNode -Name "ChooseAccount-NativeClick" -Node $targetChoice)) | Out-Null
+        } else {
+            $chooseResult = Invoke-JabAction -Name "ChooseAccount" -Path ([string]$targetChoice.path) -ExpectedRole ([string]$targetChoice.role)
+            $steps.Add($chooseResult) | Out-Null
+            if ($chooseResult.exitCode -ne 0) {
+                $steps.Add((Invoke-NativeClickNode -Name "ChooseAccount-NativeClickFallback" -Node $targetChoice)) | Out-Null
+            }
+        }
         Start-Sleep -Milliseconds 1800
 
         $verifySnapshot = New-SnapshotJson "AccountSwitchVerify-$($targetAlias -replace '[^A-Za-z0-9_.-]+','-')"
