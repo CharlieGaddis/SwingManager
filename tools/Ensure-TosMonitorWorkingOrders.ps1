@@ -19,15 +19,50 @@ $errors = New-Object System.Collections.Generic.List[string]
 $steps = New-Object System.Collections.Generic.List[object]
 
 function Invoke-Step {
-    param([string]$Name, [string]$Script, [string[]]$Arguments)
+    param([string]$Name, [string]$Script, [string[]]$Arguments, [int]$TimeoutSeconds = 45)
     if (-not (Test-Path -LiteralPath $Script)) { throw "Missing script for $Name`: $Script" }
-    $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments
+    function ConvertTo-NativeQuotedArgument([string]$Value) {
+        if ($null -eq $Value) { return '""' }
+        if ($Value -notmatch '[\s"]') { return $Value }
+        return '"' + ($Value -replace '"', '\"') + '"'
+    }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $safeName = $Name -replace '[^A-Za-z0-9_.-]+', '-'
+    $stdout = Join-Path $diagnosticsDir "tos-monitor-guard-$safeName-$stamp.out.txt"
+    $stderr = Join-Path $diagnosticsDir "tos-monitor-guard-$safeName-$stamp.err.txt"
+    $argList = (@("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Script) + @($Arguments) | ForEach-Object { ConvertTo-NativeQuotedArgument ([string]$_) }) -join " "
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = "powershell.exe"
+    $startInfo.Arguments = $argList
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) { throw "Failed to start guard step $Name." }
+    $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+    $timedOut = -not $completed
+    if ($timedOut) {
+        try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch { }
+        Start-Sleep -Milliseconds 300
+    }
+    $output = $process.StandardOutput.ReadToEnd().Trim()
+    $errorText = $process.StandardError.ReadToEnd().Trim()
+    $output | Set-Content -LiteralPath $stdout -Encoding UTF8
+    $errorText | Set-Content -LiteralPath $stderr -Encoding UTF8
+    $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
     $step = [pscustomobject]@{
         name = $Name
         script = $Script
         arguments = @($Arguments)
-        output = ($output | Out-String).Trim()
-        exitCode = $LASTEXITCODE
+        timeoutSeconds = $TimeoutSeconds
+        timedOut = $timedOut
+        output = $output
+        stderr = $errorText
+        stdoutPath = $stdout
+        stderrPath = $stderr
+        exitCode = $exitCode
     }
     $steps.Add($step) | Out-Null
     return $step
@@ -37,7 +72,7 @@ function New-SnapshotJson {
     param([string]$Label)
     $snapshotScript = Join-Path $scriptDir "New-TosAutomationSnapshot.ps1"
     $started = Get-Date
-    $step = Invoke-Step -Name "Snapshot-$Label" -Script $snapshotScript -Arguments @("-WindowTitle", $WindowTitle, "-Label", $Label, "-MaxDepth", "35", "-MaxChildrenPerNode", "1000")
+    $step = Invoke-Step -Name "Snapshot-$Label" -Script $snapshotScript -Arguments @("-WindowTitle", $WindowTitle, "-Label", $Label, "-MaxDepth", "35", "-MaxChildrenPerNode", "1000") -TimeoutSeconds 60
     if ($step.exitCode -ne 0) { throw "Snapshot command failed for $Label with exit code $($step.exitCode)." }
     $snapshot = Get-ChildItem -LiteralPath $discoveryDir -Filter "tos-$Label-*-tree.json" -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -ge $started.AddSeconds(-2) } |
@@ -71,14 +106,14 @@ function Invoke-NodeAction {
     if (-not $AllowInput) { throw "$StepName requires -AllowInput." }
     $actionScript = Join-Path $scriptDir "Invoke-TosJabActionPath.ps1"
     $args = @("-WindowTitle", $WindowTitle, "-Path", [string]$Node.path, "-ExpectedRole", $ExpectedRole, "-ExpectedName", $ExpectedName, "-AllowAction")
-    $step = Invoke-Step -Name $StepName -Script $actionScript -Arguments $args
+    $step = Invoke-Step -Name $StepName -Script $actionScript -Arguments $args -TimeoutSeconds 20
     if ($step.exitCode -eq 0) { return $step }
 
     $clickScript = Join-Path $scriptDir "Invoke-TosNativeInput.ps1"
     $x = [int]([int]$Node.bounds.x + ([int]$Node.bounds.width / 2))
     $y = [int]([int]$Node.bounds.y + ([int]$Node.bounds.height / 2))
     $clickArgs = @("-Action", "Click", "-X", [string]$x, "-Y", [string]$y, "-AllowInput")
-    $click = Invoke-Step -Name "$StepName-NativeClickFallback" -Script $clickScript -Arguments $clickArgs
+    $click = Invoke-Step -Name "$StepName-NativeClickFallback" -Script $clickScript -Arguments $clickArgs -TimeoutSeconds 15
     if ($click.exitCode -ne 0) { throw "$StepName failed by action and click fallback." }
     return $click
 }

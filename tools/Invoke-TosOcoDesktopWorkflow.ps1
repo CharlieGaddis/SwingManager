@@ -50,6 +50,61 @@ function Invoke-WorkflowStep {
     }
 }
 
+function Invoke-WorkflowStepWithTimeout {
+    param(
+        [string]$Name,
+        [string]$Script,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 90
+    )
+    if (-not (Test-Path -LiteralPath $Script)) { throw "Missing workflow script for $Name`: $Script" }
+
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $safeName = $Name -replace '[^A-Za-z0-9_.-]+', '-'
+    $stdout = Join-Path $diagnosticsDir "tos-workflow-step-$safeName-$stamp.out.txt"
+    $stderr = Join-Path $diagnosticsDir "tos-workflow-step-$safeName-$stamp.err.txt"
+    function ConvertTo-NativeQuotedArgument([string]$Value) {
+        if ($null -eq $Value) { return '""' }
+        if ($Value -notmatch '[\s"]') { return $Value }
+        return '"' + ($Value -replace '"', '\"') + '"'
+    }
+    $argList = (@("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Script) + @($Arguments) | ForEach-Object { ConvertTo-NativeQuotedArgument ([string]$_) }) -join " "
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = "powershell.exe"
+    $startInfo.Arguments = $argList
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) { throw "Failed to start child workflow process for $Name." }
+    $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+    $timedOut = -not $completed
+    if ($timedOut) {
+        try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch { }
+        Start-Sleep -Milliseconds 300
+    }
+
+    $output = $process.StandardOutput.ReadToEnd().Trim()
+    $errorText = $process.StandardError.ReadToEnd().Trim()
+    $output | Set-Content -LiteralPath $stdout -Encoding UTF8
+    $errorText | Set-Content -LiteralPath $stderr -Encoding UTF8
+    $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+    return [pscustomobject]@{
+        name = $Name
+        script = $Script
+        arguments = @($Arguments)
+        timeoutSeconds = $TimeoutSeconds
+        timedOut = $timedOut
+        output = $output
+        stderr = $errorText
+        stdoutPath = $stdout
+        stderrPath = $stderr
+        exitCode = $exitCode
+    }
+}
+
 function Get-SelectedBatchItem {
     param([object]$Batch)
     $items = @($Batch.items | Where-Object {
@@ -172,9 +227,10 @@ try {
                 $setScript = Join-Path $scriptDir "Set-TosActiveOrderEntryTriggerThreshold.ps1"
                 $args = @("-BatchPath", $BatchPath, "-Symbol", [string]$item.Symbol, "-Phase", [string]$item.Phase, "-OcoId", [string]$item.OcoId, "-ReplacingOrderId", [string]$item.ReplacingOrderId, "-SnapshotJson", $snapshot, "-WindowTitle", $WindowTitle)
                 if ($AllowInput) { $args += "-AllowInput" }
-                $step = Invoke-WorkflowStep -Name "SetThreshold" -Script $setScript -Arguments $args
+                $step = Invoke-WorkflowStepWithTimeout -Name "SetThreshold" -Script $setScript -Arguments $args -TimeoutSeconds 120
                 $steps.Add([pscustomobject]@{ name='PreSetSnapshot'; snapshotJson=$snapshot }) | Out-Null
                 $steps.Add($step) | Out-Null
+                if ($step.timedOut -eq $true) { $errors.Add("SetThreshold timed out after $($step.timeoutSeconds) seconds. The staged ticket was left unsent; inspect/clear it before retrying.") | Out-Null }
                 if ($step.exitCode -ne 0) { $errors.Add("SetThreshold failed with exit code $($step.exitCode).") | Out-Null }
             }
             'OpenConfirmation' {
@@ -214,8 +270,10 @@ try {
                 $baseArgs = @("-BatchPath", $BatchPath, "-Symbol", [string]$item.Symbol, "-Phase", [string]$item.Phase, "-OcoId", [string]$item.OcoId, "-ReplacingOrderId", [string]$item.ReplacingOrderId, "-WindowTitle", $WindowTitle)
                 foreach ($childStage in @("OpenCancelReplace", "SetThreshold", "OpenConfirmation")) {
                     $childArgs = @($baseArgs + @("-Stage", $childStage, "-AllowInput"))
-                    $child = Invoke-WorkflowStep -Name $childStage -Script $workflowScript -Arguments $childArgs
+                    $childTimeout = if ($childStage -eq "SetThreshold") { 150 } else { 90 }
+                    $child = Invoke-WorkflowStepWithTimeout -Name $childStage -Script $workflowScript -Arguments $childArgs -TimeoutSeconds $childTimeout
                     $steps.Add($child) | Out-Null
+                    if ($child.timedOut -eq $true) { $errors.Add("$childStage timed out after $($child.timeoutSeconds) seconds. The workflow stopped before confirmation/send.") | Out-Null; break }
                     if ($child.exitCode -ne 0) { $errors.Add("$childStage failed with exit code $($child.exitCode).") | Out-Null; break }
                     Start-Sleep -Milliseconds 900
                 }
@@ -230,8 +288,9 @@ try {
                 $workflowScript = $MyInvocation.MyCommand.Path
                 $baseArgs = @("-BatchPath", $BatchPath, "-Symbol", [string]$item.Symbol, "-Phase", [string]$item.Phase, "-OcoId", [string]$item.OcoId, "-ReplacingOrderId", [string]$item.ReplacingOrderId, "-WindowTitle", $WindowTitle)
                 $runArgs = @($baseArgs + @("-Stage", "RunToConfirmation", "-AllowInput"))
-                $run = Invoke-WorkflowStep -Name "RunToConfirmation" -Script $workflowScript -Arguments $runArgs
+                $run = Invoke-WorkflowStepWithTimeout -Name "RunToConfirmation" -Script $workflowScript -Arguments $runArgs -TimeoutSeconds 360
                 $steps.Add($run) | Out-Null
+                if ($run.timedOut -eq $true) { $errors.Add("RunToConfirmation timed out after $($run.timeoutSeconds) seconds. The workflow stopped before final send.") | Out-Null }
                 if ($run.exitCode -ne 0) { $errors.Add("RunToConfirmation failed with exit code $($run.exitCode).") | Out-Null }
                 if ($errors.Count -eq 0) {
                     $finalArgs = @($baseArgs + @("-Stage", "FinalSend", "-AllowInput", "-AllowFinalSend"))

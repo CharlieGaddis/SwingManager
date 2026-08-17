@@ -83,6 +83,61 @@ function Get-LatestSnapshotJson([string]$Label) {
     return $snapshot.FullName
 }
 
+function Invoke-ChildScriptWithTimeout {
+    param(
+        [string]$Name,
+        [string]$Script,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 75
+    )
+    if (-not (Test-Path -LiteralPath $Script)) { throw "Missing child script for $Name`: $Script" }
+
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $safeName = $Name -replace '[^A-Za-z0-9_.-]+', '-'
+    $stdout = Join-Path $diagnosticsDir "tos-threshold-child-$safeName-$stamp.out.txt"
+    $stderr = Join-Path $diagnosticsDir "tos-threshold-child-$safeName-$stamp.err.txt"
+    function ConvertTo-NativeQuotedArgument([string]$Value) {
+        if ($null -eq $Value) { return '""' }
+        if ($Value -notmatch '[\s"]') { return $Value }
+        return '"' + ($Value -replace '"', '\"') + '"'
+    }
+    $argList = (@("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Script) + @($Arguments) | ForEach-Object { ConvertTo-NativeQuotedArgument ([string]$_) }) -join " "
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = "powershell.exe"
+    $startInfo.Arguments = $argList
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) { throw "Failed to start child threshold process for $Name." }
+    $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+    $timedOut = -not $completed
+    if ($timedOut) {
+        try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch { }
+        Start-Sleep -Milliseconds 300
+    }
+
+    $output = $process.StandardOutput.ReadToEnd().Trim()
+    $errorText = $process.StandardError.ReadToEnd().Trim()
+    $output | Set-Content -LiteralPath $stdout -Encoding UTF8
+    $errorText | Set-Content -LiteralPath $stderr -Encoding UTF8
+    $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+    return [pscustomobject]@{
+        name = $Name
+        script = $Script
+        arguments = @($Arguments)
+        timeoutSeconds = $TimeoutSeconds
+        timedOut = $timedOut
+        output = $output
+        stderr = $errorText
+        stdoutPath = $stdout
+        stderrPath = $stderr
+        exitCode = $exitCode
+    }
+}
+
 
 $batch = Get-Content -LiteralPath $BatchPath -Raw | ConvertFrom-Json
 $items = @(Find-SelectedBatchItem $batch)
@@ -105,12 +160,15 @@ $setTextCsv = ""
 $setTextResult = $null
 $openOrderRulesCsv = ""
 $openOrderRulesResult = $null
+$openOrderRulesStep = $null
 $openOrderRulesWarning = ""
 $orderRulesEditJson = ""
 $orderRulesEditResult = $null
+$orderRulesEditStep = $null
 $postSaveWarning = ""
 $postSaveSnapshotJson = ""
 $postSaveStagedRow = $null
+$postSaveFindStep = $null
 
 if ($errors.Count -eq 0) {
     $snapshot = Get-Content -LiteralPath $SnapshotJson -Raw | ConvertFrom-Json
@@ -175,8 +233,9 @@ if ($errors.Count -eq 0) {
         "-ExpectedQuantity", " ",
         "-OutFile", $openOrderRulesCsv
     )
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $openRulesScript @openArgs | Out-Null
-    if ($LASTEXITCODE -ne 0) { $errors.Add("Open Order Rules from staged replacement ticket failed with exit code $LASTEXITCODE.") | Out-Null }
+    $openOrderRulesStep = Invoke-ChildScriptWithTimeout -Name "OpenOrderRules" -Script $openRulesScript -Arguments $openArgs -TimeoutSeconds 60
+    if ($openOrderRulesStep.timedOut -eq $true) { $errors.Add("Open Order Rules from staged replacement ticket timed out after $($openOrderRulesStep.timeoutSeconds) seconds.") | Out-Null }
+    if ($openOrderRulesStep.exitCode -ne 0) { $errors.Add("Open Order Rules from staged replacement ticket failed with exit code $($openOrderRulesStep.exitCode).") | Out-Null }
     if (-not (Test-Path -LiteralPath $openOrderRulesCsv)) { $errors.Add("Open Order Rules result CSV was not produced: $openOrderRulesCsv") | Out-Null }
     else {
         $openOrderRulesResult = Import-Csv -LiteralPath $openOrderRulesCsv | Select-Object -First 1
@@ -203,8 +262,9 @@ if ($errors.Count -eq 0) {
                 $editArgs += "-AllowInput"
                 $editArgs += "-AllowSave"
             }
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $editScript @editArgs | Out-Null
-            if ($LASTEXITCODE -ne 0) { $errors.Add("Order Rules threshold edit failed with exit code $LASTEXITCODE.") | Out-Null }
+            $orderRulesEditStep = Invoke-ChildScriptWithTimeout -Name "EditOrderRulesThreshold" -Script $editScript -Arguments $editArgs -TimeoutSeconds 90
+            if ($orderRulesEditStep.timedOut -eq $true) { $errors.Add("Order Rules threshold edit timed out after $($orderRulesEditStep.timeoutSeconds) seconds.") | Out-Null }
+            if ($orderRulesEditStep.exitCode -ne 0) { $errors.Add("Order Rules threshold edit failed with exit code $($orderRulesEditStep.exitCode).") | Out-Null }
             if (-not (Test-Path -LiteralPath $orderRulesEditJson)) { $errors.Add("Order Rules edit result JSON was not produced: $orderRulesEditJson") | Out-Null }
             else {
                 $orderRulesEditResult = Get-Content -LiteralPath $orderRulesEditJson -Raw | ConvertFrom-Json
@@ -223,8 +283,11 @@ if ($errors.Count -eq 0) {
         $postSaveSnapshotJson = Get-LatestSnapshotJson "ActiveOrderEntryPostSave-$safeSymbol"
         $findScript = Join-Path $scriptDir "Find-TosStagedOrderInSnapshot.ps1"
         $postSaveReplacingOrderId = Get-ExpectedConfirmationReplacingOrderId $item
-        $findJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $findScript -SnapshotJson $postSaveSnapshotJson -Symbol ([string]$item.Symbol) -ReplacingOrderId $postSaveReplacingOrderId -OcoId ([string]$item.OcoId) -Threshold ([string]$item.ExpectedThreshold)
-        if ($LASTEXITCODE -ne 0) { $errors.Add("Post-save staged row verification failed with exit code $LASTEXITCODE.") | Out-Null }
+        $findArgs = @("-SnapshotJson", $postSaveSnapshotJson, "-Symbol", [string]$item.Symbol, "-ReplacingOrderId", $postSaveReplacingOrderId, "-OcoId", [string]$item.OcoId, "-Threshold", [string]$item.ExpectedThreshold)
+        $postSaveFindStep = Invoke-ChildScriptWithTimeout -Name "FindPostSaveStagedOrder" -Script $findScript -Arguments $findArgs -TimeoutSeconds 45
+        $findJson = $postSaveFindStep.output
+        if ($postSaveFindStep.timedOut -eq $true) { $errors.Add("Post-save staged row verification timed out after $($postSaveFindStep.timeoutSeconds) seconds.") | Out-Null }
+        if ($postSaveFindStep.exitCode -ne 0) { $errors.Add("Post-save staged row verification failed with exit code $($postSaveFindStep.exitCode).") | Out-Null }
         else {
             $postSaveStagedRow = $findJson | ConvertFrom-Json
             if ($postSaveStagedRow.uniqueMatch -ne $true) {
@@ -249,12 +312,15 @@ $result = [ordered]@{
     setTextCsv = $setTextCsv
     setTextResult = $setTextResult
     openOrderRulesCsv = $openOrderRulesCsv
+    openOrderRulesStep = $openOrderRulesStep
     openOrderRulesResult = $openOrderRulesResult
     openOrderRulesWarning = $openOrderRulesWarning
     orderRulesEditJson = $orderRulesEditJson
+    orderRulesEditStep = $orderRulesEditStep
     orderRulesEditResult = $orderRulesEditResult
     postSaveSnapshotJson = $postSaveSnapshotJson
     postSaveStagedRow = $postSaveStagedRow
+    postSaveFindStep = $postSaveFindStep
     postSaveWarning = $postSaveWarning
     errors = @($errors)
 }
