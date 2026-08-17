@@ -45,7 +45,8 @@ Last checked on 2026-08-13:
 
 - Enabled rows only.
 - Before first live submit, Swing Manager checks Schwab recent orders for an active matching setup and blocks duplicate submission.
-- New live entries are limited to `09:35-15:30 America/New_York` on weekdays. The monitor may run outside that window, but live submits are skipped/blocked.
+- New live entries are limited to `09:30-16:30 America/New_York` on weekdays. The monitor may run outside that window, but live submits are skipped/blocked.
+- Schwab submit payloads currently use `session: NORMAL`; treat any post-16:00 order rejection as an extended-hours session handling gap, not a trigger-monitor failure.
 - Trigger must still be valid at submit time.
 - Initial order uses bid-side pricing.
 - If still working after `bidPhaseSeconds`, Swing Manager cancels the initial order and submits one mark-price replacement.

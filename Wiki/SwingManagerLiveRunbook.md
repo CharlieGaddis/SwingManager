@@ -1,6 +1,6 @@
 # Swing Manager Live Runbook
 
-Last updated: 2026-08-16
+Last updated: 2026-08-17
 
 This page is the durable checkpoint for the current live workflow. It exists so the TOS desktop automation is saved in the project, not rediscovered from chat.
 
@@ -15,9 +15,11 @@ Use the dashboard upload flow for the nightly Squeeze Intel JSON:
 
 Current live entry policy:
 
+- Live entry window is hardcoded in `Config\pending-manager.json` as `09:30-16:30 America/New_York`, weekdays only.
 - Entry-only live mode is allowed when historical OCO/stop rows are unresolved.
 - Manual OCO is required immediately after any new fill until full OCO creation is promoted.
 - One active order per setup is enforced by the pending queue/order-id tracking and live preflight.
+- Schwab submit payloads currently use `session: NORMAL`; if Schwab rejects post-16:00 entries, add explicit extended-hours session handling before relying on the 16:00-16:30 flush window.
 
 ## Existing OCO Updates
 
