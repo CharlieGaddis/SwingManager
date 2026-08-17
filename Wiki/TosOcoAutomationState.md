@@ -627,6 +627,27 @@ Code changes recorded from the run:
 - `tools\New-TosOcoUpdateBatchPlan.ps1` and the dashboard now refuse `CANCELED` / `FILLED` rows as executable desktop work.
 - The dashboard exposes `Run Next Preview` and `Run Next Final Send` so the operator can drive the next verified ready OCO item without manually selecting the row. The final-send path refreshes TOS and rebuilds the batch after a successful send.
 
+## 2026-08-16 USB Live Stop Update / Row Focus Fix
+
+Verified the remaining Living Trust USB stop replacement:
+
+- `OCO #1007453365774`: old `WAIT COND` stop at `63.51` was canceled/replaced; new active replacement `1007607036746` is `USB MARK AT OR BELOW 63.59`.
+- `OCO #1007453816390`: had already been replaced earlier in the session; post-reconcile Living Trust desktop batch reported `desktopOcoBatchReadyCount = 0`.
+
+Critical automation lesson:
+
+- Opening Order Rules from the staged two-leg order requires a row focus click first, then the far-right rules gear/cell click.
+- A direct gear click can appear to land but not open the dialog.
+- `tools\Open-TosOrderRulesForFirstOrderEntryRow.ps1` now activates TOS, clicks the staged row focus point, then clicks `rowTable.x + rowTable.width - 17` near the top leg.
+- The separate `Invoke-TosOrderRulesThresholdEdit.ps1` verifier remains the safety gate for symbol, method, operator, typed threshold, and unchecked `Submit at`.
+
+IRA check from the same run:
+
+- TOS account switch verified IRA/Rollover IRA ending `5682`.
+- Monitor > Working Orders showed `15 orders`.
+- Visible IRA stock OCOs for `CGON` and `LLY` already matched JSON levels: `CGON 68.35 / 79.69 / 83.11`, `LLY 1112.71 / 1287.61 / 1336.16`.
+- IRA desktop batch reported `desktopOcoBatchReadyCount = 0`; no existing IRA orders required a sendable update from the visible worklist.
+
 ## 2026-08-15 Account-Scoped Batch Preparation
 
 Implemented account-aware preparation so one uploaded JSON can be used for both accounts without mixing expected levels:

@@ -74,6 +74,8 @@ public static class TosOpenOrderRules {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] public static extern bool PeekMessage(out MSG msg, IntPtr hWnd, uint min, uint max, uint remove);
     [DllImport("user32.dll")] public static extern bool TranslateMessage(ref MSG msg);
     [DllImport("user32.dll")] public static extern IntPtr DispatchMessage(ref MSG msg);
@@ -121,6 +123,13 @@ public static class TosOpenOrderRules {
         mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
         PumpMessages(900);
     }
+
+    public static bool ActivateWindow(IntPtr hWnd) {
+        if (hWnd == IntPtr.Zero) return false;
+        ShowWindow(hWnd, 9);
+        System.Threading.Thread.Sleep(180);
+        return SetForegroundWindow(hWnd);
+    }
 }
 "@
 
@@ -147,6 +156,8 @@ if ($matches.Count -eq 0) {
 }
 
 $target = $matches[0]
+[TosOpenOrderRules]::ActivateWindow($target.Hwnd) | Out-Null
+[TosOpenOrderRules]::PumpMessages(600)
 $vmID = 0
 $rootAc = [IntPtr]::Zero
 if (-not [TosOpenOrderRules]::getAccessibleContextFromHWND($target.Hwnd, [ref]$vmID, [ref]$rootAc)) {
@@ -263,16 +274,7 @@ function Test-OrderRulesOpen {
         return $true
     }
     [TosOpenOrderRules]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
-    if ($found) { return $true }
-    try {
-        return (
-            (Find-NameInSubtree -Ac $rootAc -Name "Submit at:" -MaxDepth 35) -or
-            (Find-NameInSubtree -Ac $rootAc -Name "Submit when at least one of the following conditions is met:" -MaxDepth 35) -or
-            (Find-NameInSubtree -Ac $rootAc -Name "Save" -MaxDepth 35)
-        )
-    } catch {
-        return $false
-    }
+    return $found
 }
 
 $resolved = $null
@@ -307,22 +309,28 @@ if (-not $symbolOk -or -not $sideOk -or -not $quantityOk) {
     throw "Refusing to open rules. Expected row verification failed. Symbol=$symbolOk Side=$sideOk Quantity=$quantityOk."
 }
 
-$gearInsetX = 24
+$gearInsetX = 17
 $clickX = if ($OrderRulesOffsetX -gt 0) {
     [int]($rowInfo.x + $OrderRulesOffsetX)
 } else {
     [int]($rowInfo.x + [Math]::Max(30, $rowInfo.width - $gearInsetX))
 }
 $clickY = [int]($rowInfo.y + [Math]::Max(7, [Math]::Min(($rowInfo.height / 4), 10)))
+$rowFocusX = [int]($rowInfo.x + [Math]::Min(30, [Math]::Max(8, ($rowInfo.width / 8))))
+$rowFocusY = $clickY
 $beforeOpen = Test-OrderRulesOpen
 $clicked = $false
+$rowFocused = $false
 
 if (-not $DryRun -and -not $beforeOpen) {
+    [TosOpenOrderRules]::Click($rowFocusX, $rowFocusY)
+    $rowFocused = $true
+    [TosOpenOrderRules]::PumpMessages(350)
     [TosOpenOrderRules]::Click($clickX, $clickY)
     $clicked = $true
 }
 
-[TosOpenOrderRules]::PumpMessages(1000)
+[TosOpenOrderRules]::PumpMessages(1800)
 $afterOpen = Test-OrderRulesOpen
 
 $row = [pscustomobject]@{
@@ -338,6 +346,9 @@ $row = [pscustomobject]@{
     SideVerified = $sideOk
     QuantityVerified = $quantityOk
     OrderRulesOffsetX = $OrderRulesOffsetX
+    RowFocusX = $rowFocusX
+    RowFocusY = $rowFocusY
+    RowFocused = $rowFocused
     ClickX = $clickX
     ClickY = $clickY
     DryRun = [bool]$DryRun
