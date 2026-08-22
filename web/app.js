@@ -136,6 +136,33 @@ function ocoStatusClass(status) {
   return "oco-status";
 }
 
+function apiWorksheetStatusClass(status) {
+  if (status === "API_CONFIRMED_STRUCTURE_MANUAL_VERIFY_TARGETS") return "oco-status review";
+  if (status === "MISSING_PROTECTION" || status === "API_TARGET_FOUND_STOP_MISSING") return "oco-status missing";
+  if (status === "API_CONFIRMED_STOP_ONLY" || status === "API_STRUCTURE_REVIEW") return "oco-status review";
+  return "oco-status";
+}
+
+function apiWorksheetRowHtml(row) {
+  return `
+    <tr>
+      <td>${row.Account || ""}</td>
+      <td>${row.Ticker || ""}</td>
+      <td title="${row.ContractLabel || ""}">${row.ContractLabel || ""}</td>
+      <td>${row.Portfolio || ""}</td>
+      <td class="num">${money(row.ExpectedStop)}</td>
+      <td class="num">${money(row.ExpectedT1)}</td>
+      <td class="num">${money(row.ExpectedT2)}</td>
+      <td class="num">${row.ApiWorkingChildRows || ""}</td>
+      <td class="num">${row.ApiStopChildren || ""}</td>
+      <td class="num">${row.ApiTargetChildren || ""}</td>
+      <td title="${row.ApiParentOcoIds || ""}">${row.ApiParentOcoIds || ""}</td>
+      <td title="${row.ApiStopPrices || ""}">${row.ApiStopPrices || ""}</td>
+      <td><span class="${apiWorksheetStatusClass(row.WorksheetStatus)}">${row.WorksheetStatus || ""}</span></td>
+      <td title="${row.NextAction || ""}">${row.NextAction || ""}</td>
+    </tr>`;
+}
+
 function ocoRowHtml(row) {
   return `
     <tr>
@@ -153,9 +180,12 @@ function ocoRowHtml(row) {
 }
 
 function desktopOcoItemHtml(item) {
+  const ready = item.ReadyForDesktopAutomation === true && item.AccountVerified === true;
+  const disabled = ready ? "" : " disabled";
+  const blockedTitle = ready ? "" : " title=\"Prepare the matching TOS account and rebuild/verify the batch before running automation.\"";
   return `
     <tr>
-      <td class="workflow-inline-actions"><button type="button" data-action="plan-desktop-oco" data-symbol="${item.Symbol || ""}" data-phase="${item.Phase || ""}" data-oco-id="${item.OcoId || ""}" data-replacing-order-id="${item.ReplacingOrderId || ""}">Plan</button><button type="button" data-action="preview-desktop-oco" data-symbol="${item.Symbol || ""}" data-phase="${item.Phase || ""}" data-oco-id="${item.OcoId || ""}" data-replacing-order-id="${item.ReplacingOrderId || ""}">Preview</button><button type="button" data-action="send-desktop-oco" data-symbol="${item.Symbol || ""}" data-phase="${item.Phase || ""}" data-oco-id="${item.OcoId || ""}" data-replacing-order-id="${item.ReplacingOrderId || ""}">Final Send</button></td>
+      <td class="workflow-inline-actions"><button type="button" data-action="plan-desktop-oco" data-symbol="${item.Symbol || ""}" data-phase="${item.Phase || ""}" data-oco-id="${item.OcoId || ""}" data-replacing-order-id="${item.ReplacingOrderId || ""}"${disabled}${blockedTitle}>Plan</button><button type="button" data-action="preview-desktop-oco" data-symbol="${item.Symbol || ""}" data-phase="${item.Phase || ""}" data-oco-id="${item.OcoId || ""}" data-replacing-order-id="${item.ReplacingOrderId || ""}"${disabled}${blockedTitle}>Preview</button><button type="button" data-action="send-desktop-oco" data-symbol="${item.Symbol || ""}" data-phase="${item.Phase || ""}" data-oco-id="${item.OcoId || ""}" data-replacing-order-id="${item.ReplacingOrderId || ""}"${disabled}${blockedTitle}>Final Send</button></td>
       <td>${item.TargetAccountAlias || item.CurrentTosAccountAlias || ""}</td>
       <td title="${item.InstrumentLabel || ""}">${item.Symbol || ""} ${item.InstrumentLabel || ""}</td>
       <td>${item.Phase || ""}</td>
@@ -164,7 +194,7 @@ function desktopOcoItemHtml(item) {
       <td class="num">${money(item.CurrentThreshold)}</td>
       <td class="num">${money(item.ExpectedThreshold)}</td>
       <td class="num">${money(item.Delta)}</td>
-      <td>${item.SnapshotStatus || ""}</td>
+      <td>${ready ? (item.SnapshotStatus || "Ready") : (item.AccountContextSource || "Not verified")}</td>
     </tr>`;
 }
 function jsonUpdateHtml(row) {
@@ -307,9 +337,36 @@ async function loadOcoReview() {
     const response = await fetch("/api/oco");
     const data = await response.json();
     const counts = Object.entries(data.counts || {}).map(([name, count]) => `${name}: ${count}`).join(" | ");
+    const apiRows = data.apiWorksheet || [];
     const rows = data.reconciliation || [];
     const updates = data.jsonUpdates || [];
     ocoReviewEl.innerHTML = `
+      <h3>API OCO Worksheet</h3>
+      <div class="oco-summary">${apiRows.length ? `${apiRows.length} expected active OCO rows from Schwab API` : "No Schwab API OCO worksheet loaded"}${data.apiWorksheetPath ? ` | ${pathLeaf(data.apiWorksheetPath)}` : ""}</div>
+      <div class="table-wrap">
+        <table class="oco-table api-worksheet-table">
+          <thead>
+            <tr>
+              <th style="width:120px">Account</th>
+              <th style="width:80px">Ticker</th>
+              <th style="width:130px">Contract</th>
+              <th style="width:90px">Type</th>
+              <th style="width:80px" class="num">Stop</th>
+              <th style="width:80px" class="num">T1</th>
+              <th style="width:80px" class="num">T2</th>
+              <th style="width:70px" class="num">Rows</th>
+              <th style="width:70px" class="num">Stops</th>
+              <th style="width:76px" class="num">Targets</th>
+              <th style="width:160px">OCO IDs</th>
+              <th style="width:120px">API Stop</th>
+              <th style="width:270px">Worksheet Status</th>
+              <th style="width:300px">Next Action</th>
+            </tr>
+          </thead>
+          <tbody>${apiRows.map(apiWorksheetRowHtml).join("")}</tbody>
+        </table>
+      </div>
+      <h3>TOS Visible-Order Check</h3>
       <div class="oco-summary">${counts || "No TOS reconciliation loaded"}</div>
       <div class="table-wrap">
         <table class="oco-table">
@@ -374,7 +431,7 @@ async function loadOcoReview() {
               <th style="width:100px">Status</th>
             </tr>
           </thead>
-          <tbody>${(data.desktopBatch?.readyItems || []).map(desktopOcoItemHtml).join("")}</tbody>
+          <tbody>${(data.desktopBatch?.updateItems || data.desktopBatch?.readyItems || []).map(desktopOcoItemHtml).join("")}</tbody>
         </table>
       </div>`;
   } catch (error) {

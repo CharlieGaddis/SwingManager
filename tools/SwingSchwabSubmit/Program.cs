@@ -9,8 +9,6 @@ const string TradingDashboardBaseUrl = "http://127.0.0.1:5080";
 const string TraderBaseUrl = "https://api.schwabapi.com/trader/v1";
 const string TokenProtectorPurpose = "TradingDashboard.Schwab.OAuthTokens.v1";
 const string DataProtectionApplicationName = "TradingDashboard.SchwabOAuth.v1";
-const string DataProtectionKeyDirectory =
-    @"D:\AI-Chat GPT\TradingDashboard\App\Dashboard\DataProtection";
 
 if (args.Length == 0)
 {
@@ -520,7 +518,7 @@ static async Task<Quote> GetQuoteAsync(HttpClient http, string symbol)
 
 static OptionContract Required(Dictionary<decimal, OptionContract> calls, decimal strike)
 {
-    if (!calls.TryGetValue(strike, out OptionContract value))
+    if (!calls.TryGetValue(strike, out OptionContract? value) || value is null)
         throw new InvalidOperationException($"PBF {strike}C was not found in the option chain.");
     if (string.IsNullOrWhiteSpace(value.Symbol) || value.Mark <= 0)
         throw new InvalidOperationException($"PBF {strike}C had an unusable symbol or mark.");
@@ -535,11 +533,12 @@ static ParsedContractLabel ParseContractLabel(string label)
         System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     if (!match.Success)
         throw new InvalidOperationException($"Could not parse contract label: {label}");
-    int year = DateTime.Today.Year;
-    DateOnly expiration = new(
-        year,
-        int.Parse(match.Groups["month"].Value, CultureInfo.InvariantCulture),
-        int.Parse(match.Groups["day"].Value, CultureInfo.InvariantCulture));
+    DateOnly today = DateOnly.FromDateTime(DateTime.Today);
+    int month = int.Parse(match.Groups["month"].Value, CultureInfo.InvariantCulture);
+    int day = int.Parse(match.Groups["day"].Value, CultureInfo.InvariantCulture);
+    DateOnly expiration = new(today.Year, month, day);
+    if (expiration < today)
+        expiration = new DateOnly(today.Year + 1, month, day);
     string right = match.Groups["right"].Value.Equals("P", StringComparison.OrdinalIgnoreCase)
         ? "PUT"
         : "CALL";
@@ -602,6 +601,11 @@ static string LoadAccessToken()
 
 static JsonNode LoadTokenNode(out string tokenPath, out string keyDirectory)
 {
+    if (!OperatingSystem.IsWindows())
+        throw new PlatformNotSupportedException("Schwab token protection requires Windows DPAPI.");
+
+    string? configuredDataProtectionKeyDirectory =
+        Environment.GetEnvironmentVariable("TRADING_DASHBOARD_DATA_PROTECTION_PATH");
     tokenPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "TradingDashboard",
@@ -615,9 +619,10 @@ static JsonNode LoadTokenNode(out string tokenPath, out string keyDirectory)
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TradingDashboard",
-            "DataProtection-Keys"),
-        DataProtectionKeyDirectory
+            "DataProtection-Keys")
     };
+    if (!string.IsNullOrWhiteSpace(configuredDataProtectionKeyDirectory))
+        keyDirectories.Add(configuredDataProtectionKeyDirectory);
     Exception? lastError = null;
     foreach (string candidate in keyDirectories.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
     {
@@ -625,7 +630,12 @@ static JsonNode LoadTokenNode(out string tokenPath, out string keyDirectory)
         {
             IDataProtector protector = DataProtectionProvider.Create(
                     new DirectoryInfo(candidate),
-                    builder => builder.SetApplicationName(DataProtectionApplicationName).ProtectKeysWithDpapi())
+                    builder =>
+                    {
+                        IDataProtectionBuilder configured = builder.SetApplicationName(DataProtectionApplicationName);
+                        if (OperatingSystem.IsWindows())
+                            configured.ProtectKeysWithDpapi();
+                    })
                 .CreateProtector(TokenProtectorPurpose);
             string json = protector.Unprotect(File.ReadAllText(tokenPath));
             keyDirectory = candidate;

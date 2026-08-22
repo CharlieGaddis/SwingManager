@@ -15,6 +15,8 @@ Use the dashboard upload flow for the nightly Squeeze Intel JSON:
 
 Current live entry policy:
 
+- Swing Manager is production-approved for live pending-entry submission. Do not turn off live entries or change `Config\pending-manager.json` back to `paper` unless Charlie explicitly requests that.
+- TradingDashboard order capability is separate from Swing Manager entry submission. If TradingDashboard is connected and the shared Schwab token/account lookup works, a disabled TradingDashboard order toggle must not stop Swing Manager from entering trades.
 - Live entry window is hardcoded in `Config\pending-manager.json` as `09:30-16:00 America/New_York`, weekdays only.
 - Entry-only live mode is allowed when historical OCO/stop rows are unresolved.
 - Manual OCO is required immediately after any new fill until full OCO creation is promoted.

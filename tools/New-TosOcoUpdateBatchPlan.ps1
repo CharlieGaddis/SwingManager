@@ -1,6 +1,7 @@
 ﻿param(
     [string]$VisibleOrdersCsv = "$PSScriptRoot\..\Analysis\tos-visible-working-orders-20260814-085707.csv",
     [string]$ReconciliationCsv = "$PSScriptRoot\..\Analysis\tos-oco-reconciliation-20260814-085707.csv",
+    [string]$UpdateLevelsCsv = "",
     [string]$SnapshotJson = "",
     [string]$Symbol = "",
     [string]$TargetAccount = "",
@@ -13,10 +14,12 @@ Import-Module (Join-Path $PSScriptRoot "TosPrivacyRedactor.psm1") -Force
 
 if (-not (Test-Path -LiteralPath $VisibleOrdersCsv)) { throw "Visible orders CSV not found: $VisibleOrdersCsv" }
 if (-not (Test-Path -LiteralPath $ReconciliationCsv)) { throw "Reconciliation CSV not found: $ReconciliationCsv" }
+if (-not [string]::IsNullOrWhiteSpace($UpdateLevelsCsv) -and -not (Test-Path -LiteralPath $UpdateLevelsCsv)) { throw "Update levels CSV not found: $UpdateLevelsCsv" }
 if (-not [string]::IsNullOrWhiteSpace($SnapshotJson) -and -not (Test-Path -LiteralPath $SnapshotJson)) { throw "Snapshot JSON not found: $SnapshotJson" }
 
 $visible = @(Import-Csv -LiteralPath $VisibleOrdersCsv)
 $recon = @(Import-Csv -LiteralPath $ReconciliationCsv)
+$updateLevels = if ([string]::IsNullOrWhiteSpace($UpdateLevelsCsv)) { @() } else { @(Import-Csv -LiteralPath $UpdateLevelsCsv) }
 $snapshotNodes = @()
 if (-not [string]::IsNullOrWhiteSpace($SnapshotJson)) {
     $snapshot = Get-Content -LiteralPath $SnapshotJson -Raw | ConvertFrom-Json
@@ -246,6 +249,37 @@ foreach ($r in $recon) {
     }
     $levelsBySymbol[$ticker].ReconciliationRows.Add($r) | Out-Null
 }
+foreach ($r in $updateLevels) {
+    $ticker = ([string]$r.Ticker).Trim().ToUpperInvariant()
+    if ($ticker.Length -eq 0) { continue }
+    if ($Symbol -and $ticker -ne $Symbol.ToUpperInvariant()) { continue }
+    $rowAccount = Normalize-TosAccountAlias ([string]$r.Account)
+    if (-not [string]::IsNullOrWhiteSpace($targetAccountAlias) -and $rowAccount -ne $targetAccountAlias) { continue }
+
+    if (-not $levelsBySymbol.ContainsKey($ticker)) {
+        $levelsBySymbol[$ticker] = [ordered]@{
+            Ticker = $ticker
+            TargetAccountAlias = $rowAccount
+            TargetAccountEnding = Get-ExpectedAccountEnding $rowAccount
+            ExpectedStop = ''
+            ExpectedT1 = ''
+            ExpectedT2 = ''
+            Accounts = New-Object System.Collections.Generic.List[string]
+            ReconciliationRows = New-Object System.Collections.Generic.List[object]
+        }
+    }
+
+    $accountLabel = ((@($r.Account, $r.Portfolio, $r.ContractLabel) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join ' / ')
+    if ($accountLabel -and -not $levelsBySymbol[$ticker].Accounts.Contains($accountLabel)) {
+        $levelsBySymbol[$ticker].Accounts.Add($accountLabel) | Out-Null
+    }
+
+    switch ([string]$r.Level) {
+        'Stop' { $levelsBySymbol[$ticker].ExpectedStop = $r.ExpectedThreshold }
+        'T1' { $levelsBySymbol[$ticker].ExpectedT1 = $r.ExpectedThreshold }
+        'T2' { $levelsBySymbol[$ticker].ExpectedT2 = $r.ExpectedThreshold }
+    }
+}
 
 $items = New-Object System.Collections.Generic.List[object]
 $missing = New-Object System.Collections.Generic.List[object]
@@ -363,6 +397,7 @@ $result = [pscustomobject]@{
     createdUtc = (Get-Date).ToUniversalTime().ToString('o')
     visibleOrdersCsv = $VisibleOrdersCsv
     reconciliationCsv = $ReconciliationCsv
+    updateLevelsCsv = $UpdateLevelsCsv
     snapshotJson = $SnapshotJson
     symbol = $Symbol
     targetAccount = [pscustomobject]@{ Alias = $targetAccountAlias; Ending = $targetAccountEnding }

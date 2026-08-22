@@ -2,6 +2,8 @@
     "tradingDashboardBaseUrl":  "http://127.0.0.1:5080",
     "executionMode":  "live",
     "quotePollSeconds":  5,
+    "tokenRefreshSeconds":  600,
+    "maxQuoteAgeSeconds":  180,
     "firstMinuteRefreshSeconds":  15,
     "bidPhaseSeconds":  60,
     "enableCancelReplaceLadder":  true,

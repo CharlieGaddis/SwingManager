@@ -72,7 +72,8 @@ function New-SnapshotJson {
     param([string]$Label)
     $snapshotScript = Join-Path $scriptDir "New-TosAutomationSnapshot.ps1"
     $started = Get-Date
-    $step = Invoke-Step -Name "Snapshot-$Label" -Script $snapshotScript -Arguments @("-WindowTitle", $WindowTitle, "-Label", $Label, "-MaxDepth", "35", "-MaxChildrenPerNode", "1000") -TimeoutSeconds 60
+    # Navigation only needs the visible TOS controls, not a full deep tree.
+    $step = Invoke-Step -Name "Snapshot-$Label" -Script $snapshotScript -Arguments @("-WindowTitle", $WindowTitle, "-Label", $Label, "-MaxDepth", "28", "-MaxChildrenPerNode", "300") -TimeoutSeconds 90
     if ($step.exitCode -ne 0) { throw "Snapshot command failed for $Label with exit code $($step.exitCode)." }
     $snapshot = Get-ChildItem -LiteralPath $discoveryDir -Filter "tos-$Label-*-tree.json" -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -ge $started.AddSeconds(-2) } |
@@ -110,7 +111,7 @@ function Invoke-NodeAction {
     if ($step.exitCode -eq 0) { return $step }
 
     $clickScript = Join-Path $scriptDir "Invoke-TosNativeInput.ps1"
-    $x = [int]([int]$Node.bounds.x + ([int]$Node.bounds.width / 2))
+    $x = [int]([int]$Node.bounds.x + [Math]::Min(16, [Math]::Max(6, [int]($Node.bounds.width / 4))))
     $y = [int]([int]$Node.bounds.y + ([int]$Node.bounds.height / 2))
     $clickArgs = @("-Action", "Click", "-X", [string]$x, "-Y", [string]$y, "-AllowInput")
     $click = Invoke-Step -Name "$StepName-NativeClickFallback" -Script $clickScript -Arguments $clickArgs -TimeoutSeconds 15
@@ -173,6 +174,7 @@ $result = [ordered]@{
 $outDir = Split-Path -Parent $OutFile
 if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
 $result | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $OutFile -Encoding UTF8
-$result | ConvertTo-Json -Depth 16
+$result | ConvertTo-Json -Depth 16 -Compress
 Write-Host "Wrote TOS Monitor/Working Orders guard result to $OutFile"
 if ($errors.Count -gt 0) { exit 2 }
+exit 0

@@ -10,6 +10,8 @@ Last updated: 2026-08-16
 - Save-capable: can save an order dialog after validation.
 - Submit-capable: can submit/cancel/replace live orders. Use only after explicit approval and verification.
 
+Swing Manager production rule: do not turn off pending-entry live submission or downgrade it to paper unless Charlie explicitly requests that. Swing Manager is the approved production path for entering triggered swing trades without consuming buying power early through broker-side conditional entry orders. TradingDashboard's separate Schwab order-capability flag is not a Swing Manager kill switch; the Swing Manager submit helper uses shared Schwab auth/account lookup plus direct Schwab API submission.
+
 ## Current Tools
 
 | Tool | Level | Purpose |

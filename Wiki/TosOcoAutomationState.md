@@ -92,9 +92,12 @@ The pieces exist, but row-level cancel/replace and final confirm/send are not ye
 
 If TOS does not expose the exact row through JAB, stop and ask the operator to expose that row. Do not scroll blindly during a live update.
 
-## Restore Old C Directory?
+## Project Location Rule
 
-The old `C:\Users\charl\Documents\ChatGPT\SwingManager` directory is not present. Do not restore it yet. Restore only if we determine there was a missing script not present in `D:\AI-Chat GPT\SwingManager`. The D project already contains the recovered screenshots, JAB dumps, workflow notes, and current tools needed to continue.
+No C-drive Swing Manager directory is authoritative. Do not restore or use one.
+The sole Swing Manager application root is `D:\AI-Chat GPT\SwingManager`,
+which contains the recovered screenshots, JAB dumps, workflow notes, and
+current tools needed to continue.
 
 ## 2026-08-12 21:12 ET Live Dry-Run Results
 

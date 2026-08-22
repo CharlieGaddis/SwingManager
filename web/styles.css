@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   color-scheme: light;
   --bg: #f4f6f8;
   --ink: #16202a;
@@ -239,6 +239,10 @@ tr:last-child td {
 
 .oco-table {
   min-width: 1100px;
+}
+
+.api-worksheet-table {
+  min-width: 1780px;
 }
 
 .oco-status {

@@ -270,7 +270,7 @@ try {
                 $baseArgs = @("-BatchPath", $BatchPath, "-Symbol", [string]$item.Symbol, "-Phase", [string]$item.Phase, "-OcoId", [string]$item.OcoId, "-ReplacingOrderId", [string]$item.ReplacingOrderId, "-WindowTitle", $WindowTitle)
                 foreach ($childStage in @("OpenCancelReplace", "SetThreshold", "OpenConfirmation")) {
                     $childArgs = @($baseArgs + @("-Stage", $childStage, "-AllowInput"))
-                    $childTimeout = if ($childStage -eq "SetThreshold") { 150 } else { 90 }
+                    $childTimeout = if ($childStage -eq "SetThreshold") { 150 } elseif ($childStage -eq "OpenCancelReplace") { 210 } else { 90 }
                     $child = Invoke-WorkflowStepWithTimeout -Name $childStage -Script $workflowScript -Arguments $childArgs -TimeoutSeconds $childTimeout
                     $steps.Add($child) | Out-Null
                     if ($child.timedOut -eq $true) { $errors.Add("$childStage timed out after $($child.timeoutSeconds) seconds. The workflow stopped before confirmation/send.") | Out-Null; break }

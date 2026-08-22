@@ -10,11 +10,34 @@ param(
     [string]$ExceptionRegistryPath = ".\Config\swing-oco-exceptions.csv",
     [decimal]$StockMaxCapital = 5000.00,
     [decimal]$DefaultOptionBudget = 2500.00,
-    [string]$IraAccountNumber = "68885682",
-    [string]$LivingTrustAccountNumber = "86119157"
+    [string]$IraAccountNumber = "",
+    [string]$LivingTrustAccountNumber = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+$machineConfigPath = Join-Path $PSScriptRoot "Config\machine.local.json"
+$machineConfig = if (Test-Path -LiteralPath $machineConfigPath) {
+    Get-Content -Raw -LiteralPath $machineConfigPath | ConvertFrom-Json
+} else {
+    $null
+}
+if ([string]::IsNullOrWhiteSpace($IraAccountNumber)) {
+    $IraAccountNumber = $env:SWING_MANAGER_IRA_ACCOUNT_NUMBER
+}
+if ([string]::IsNullOrWhiteSpace($IraAccountNumber) -and $machineConfig) {
+    $IraAccountNumber = [string]$machineConfig.iraAccountNumber
+}
+if ([string]::IsNullOrWhiteSpace($LivingTrustAccountNumber)) {
+    $LivingTrustAccountNumber = $env:SWING_MANAGER_TRUST_ACCOUNT_NUMBER
+}
+if ([string]::IsNullOrWhiteSpace($LivingTrustAccountNumber) -and $machineConfig) {
+    $LivingTrustAccountNumber = [string]$machineConfig.livingTrustAccountNumber
+}
+if ([string]::IsNullOrWhiteSpace($IraAccountNumber) -or
+    [string]::IsNullOrWhiteSpace($LivingTrustAccountNumber)) {
+    throw "Swing Manager account selectors are missing. Configure them in the ignored Config\machine.local.json file or the SWING_MANAGER account environment variables."
+}
 
 if (-not (Test-Path -LiteralPath $OutDir)) {
     New-Item -ItemType Directory -Path $OutDir | Out-Null
@@ -331,6 +354,7 @@ if (-not [string]::IsNullOrWhiteSpace($TosVisibleOrdersPath) -and -not [string]:
         $batchArgs = @{
             VisibleOrdersCsv = $TosVisibleOrdersPath
             ReconciliationCsv = $TosReconciliationPath
+            UpdateLevelsCsv = $updateLevelsCsv
             OutFile = $desktopOcoBatchPlanJson
         }
         if (-not [string]::IsNullOrWhiteSpace($TosSnapshotJson)) { $batchArgs.SnapshotJson = $TosSnapshotJson }

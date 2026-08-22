@@ -2,12 +2,17 @@ param(
     [string]$DownloadsDir = "$env:USERPROFILE\Downloads",
     [string]$SourcePath = "",
     [string]$SourceUrl = "",
-    [string]$OutDir = "$PSScriptRoot\Analysis",
+    [string]$OutDir = "",
     [switch]$CaptureTos,
     [string]$TradingDashboardBaseUrl = "http://127.0.0.1:5080"
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($OutDir)) {
+    $paths = & "$PSScriptRoot\tools\Resolve-SwingManagerRuntime.ps1" -ProjectRoot $PSScriptRoot
+    $OutDir = [string]$paths.AnalysisPath
+}
 
 if (-not (Test-Path -LiteralPath $OutDir)) {
     New-Item -ItemType Directory -Path $OutDir | Out-Null
@@ -62,6 +67,11 @@ if (Test-Path -LiteralPath $previousPath) {
 $queue = & "$PSScriptRoot\Build-SqueezeActionQueue.ps1" @queueArgs
 $tosRecon = ""
 if ($CaptureTos) {
+    $monitorGuard = & "$PSScriptRoot\tools\Ensure-TosMonitorWorkingOrders.ps1" -WindowTitle "Main@thinkorswim" -AllowInput
+    $monitorGuardJson = ($monitorGuard | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1) | ConvertFrom-Json
+    if ($null -eq $monitorGuardJson -or @($monitorGuardJson.errors).Count -gt 0) {
+        throw "TOS preflight stopped because Monitor > Working Orders could not be verified. $($monitorGuard | Out-String)"
+    }
     $treePath = Join-Path $OutDir "tos-jab-tree-$($todayDate.ToString('yyyyMMdd')).txt"
     & "$PSScriptRoot\tools\Dump-TosJabTree.ps1" -WindowTitle "thinkorswim" -OutFile $treePath -MaxDepth 45 -MaxChildrenPerNode 300 | Out-Null
     $tos = & "$PSScriptRoot\Extract-TosWorkingOrdersFromTree.ps1" -TreePath $treePath -ActionQueuePath $queue.CsvPath -OutDir $OutDir

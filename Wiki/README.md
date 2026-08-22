@@ -2,9 +2,24 @@
 
 Last updated: 2026-08-12 22:45 ET
 
+## Project Locations
+
+The desktop source roots are `D:\AI-Chat GPT\SwingManager` and
+`D:\AI-Chat GPT\TradingDashboard`. Swing Manager now also supports a portable
+laptop checkout on another drive: its launcher derives the code root from its
+own location, while `Config\machine.local.json` selects a machine-local runtime
+root for `Data` and `Analysis`.
+
+See [PortableTwoMachineSetup.md](PortableTwoMachineSetup.md) for the desktop and
+laptop profile rules. The coordinated installer and Git workflow live in
+TradingDashboard `Docs\LAPTOP_DEPLOYMENT.md`. Git synchronizes source code only;
+runtime state, account selectors, OAuth, and TOS artifacts remain local.
+
 ## Mission
 
 Swing Manager manages Squeeze Intel swing trades from daily JSON reports and coordinates with Schwab/thinkorswim.
+
+Production rule: Swing Manager is the approved production path for pending swing entries. Do not disable its ability to enter live Schwab trades because TradingDashboard's separate dashboard order capability is off. Swing Manager's purpose is to wait for the underlying trigger and submit only then, avoiding broker-side conditional entry orders that would consume IRA or Living Trust buying power early.
 
 Core responsibilities:
 
@@ -15,7 +30,7 @@ Core responsibilities:
 - Create or maintain protective risk-management orders after fills.
 - Use TOS desktop automation for conditional option/spread OCO management because Schwab API does not support the required cross-symbol conditional workflow.
 
-## Current App Location
+## Desktop App Location
 
 Active project:
 
@@ -30,6 +45,9 @@ Launch:
 ```powershell
 & "D:\AI-Chat GPT\SwingManager\Start-SwingPendingManager.ps1" -OpenBrowser
 ```
+
+On a portable laptop checkout, run the same launcher from that checkout instead
+of using a D-drive path.
 
 ## Current Data Source
 

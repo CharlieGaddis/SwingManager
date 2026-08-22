@@ -16,22 +16,47 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
-ANALYSIS = ROOT / "Analysis"
 CONFIG_PATH = ROOT / "Config" / "pending-manager.json"
-DATA_DIR = ROOT / "Data"
+MACHINE_CONFIG_PATH = ROOT / "Config" / "machine.local.json"
+
+
+def resolve_runtime_root():
+    configured = os.environ.get("SWING_MANAGER_RUNTIME_ROOT", "").strip()
+    if not configured and MACHINE_CONFIG_PATH.exists():
+        try:
+            configured = str(json.loads(MACHINE_CONFIG_PATH.read_text(encoding="utf-8-sig")).get("runtimeRoot") or "").strip()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Could not read {MACHINE_CONFIG_PATH}: {exc}") from exc
+    if not configured:
+        return ROOT
+    expanded = Path(os.path.expandvars(configured)).expanduser()
+    return expanded if expanded.is_absolute() else ROOT / expanded
+
+
+RUNTIME_ROOT = resolve_runtime_root()
+ANALYSIS = RUNTIME_ROOT / "Analysis"
+DATA_DIR = RUNTIME_ROOT / "Data"
 STATE_PATH = DATA_DIR / "pending-state.json"
 EVENT_LOG = DATA_DIR / "pending-events.jsonl"
 NIGHTLY_STATUS_PATH = DATA_DIR / "nightly-workflow-status.json"
 WEB_DIR = ROOT / "web"
 SUBMIT_PROJECT = ROOT / "tools" / "SwingSchwabSubmit" / "SwingSchwabSubmit.csproj"
-PYTHON_RUNTIME = r"C:\Users\charl\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+SUBMIT_DLL = ROOT / "tools" / "SwingSchwabSubmit" / "bin" / "Release" / "net8.0" / "SwingSchwabSubmit.dll"
+STATE_LOCK = threading.RLock()
 
 runtime = {
     "monitor_running": False,
+    "monitor_desired": False,
     "monitor_started_at": None,
+    "monitor_restart_count": 0,
+    "last_monitor_error": None,
     "last_quote_error": None,
+    "last_quote_refresh_at": None,
+    "last_quote_freshness": None,
     "last_order_error": None,
     "last_live_preflight": None,
+    "last_token_refresh_at": None,
+    "last_token_refresh_error": None,
     "quotes": {},
     "working": {},
     "thread": None,
@@ -52,9 +77,9 @@ def parse_utc(value):
 
 
 def ensure_dirs():
-    DATA_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     (ROOT / "Config").mkdir(exist_ok=True)
-    ANALYSIS.mkdir(exist_ok=True)
+    ANALYSIS.mkdir(parents=True, exist_ok=True)
 
 
 def load_json(path: Path, default):
@@ -142,11 +167,29 @@ def require_live_entry_window():
 
 
 def state():
-    return load_json(STATE_PATH, {"rows": {}})
+    with STATE_LOCK:
+        return load_json(STATE_PATH, {"rows": {}})
 
 
 def save_state(value):
-    save_json(STATE_PATH, value)
+    with STATE_LOCK:
+        save_json(STATE_PATH, value)
+
+
+def update_row_state(row_id_value, updates):
+    with STATE_LOCK:
+        stored = load_json(STATE_PATH, {"rows": {}})
+        row_state = stored.setdefault("rows", {}).setdefault(row_id_value, {})
+        row_state.update(updates)
+        save_json(STATE_PATH, stored)
+        return dict(row_state)
+
+
+def runtime_row_updates(row_state):
+    return {
+        key: value for key, value in row_state.items()
+        if key not in {"enabled", "deleted"}
+    }
 
 
 def latest_file(pattern):
@@ -199,10 +242,12 @@ def read_csv_rows(path, limit=None):
 
 def load_oco_review():
     reconciliation_path = latest_file("tos-oco-reconciliation-*.csv")
+    api_worksheet_path = latest_file("schwab-working-orders-api-reconciliation-*.csv")
     update_path = latest_file("swing-oco-update-queue-*.csv")
     queue_path = latest_queue_path()
     desktop_batch_path, desktop_batch = load_desktop_oco_batch()
     reconciliation = read_csv_rows(reconciliation_path)
+    api_worksheet = build_api_oco_worksheet(read_csv_rows(api_worksheet_path))
     update_rows = read_csv_rows(update_path)
     json_updates = []
     if queue_path:
@@ -213,6 +258,7 @@ def load_oco_review():
         counts[status] = counts.get(status, 0) + 1
     return {
         "reconciliationPath": str(reconciliation_path) if reconciliation_path else None,
+        "apiWorksheetPath": str(api_worksheet_path) if api_worksheet_path else None,
         "updateQueuePath": str(update_path) if update_path else None,
         "actionQueuePath": str(queue_path) if queue_path else None,
         "desktopBatchPath": str(desktop_batch_path) if desktop_batch_path else None,
@@ -224,12 +270,68 @@ def load_oco_review():
             "targetAccount": desktop_batch.get("targetAccount", {}),
             "currentTosAccount": desktop_batch.get("currentTosAccount", {}),
             "readyItems": desktop_oco_ready_items(desktop_batch),
+            "updateItems": desktop_oco_update_items(desktop_batch),
         },
         "counts": counts,
+        "apiWorksheet": api_worksheet,
         "reconciliation": reconciliation,
         "updateQueue": update_rows,
         "jsonUpdates": json_updates,
     }
+
+
+def api_oco_status(row):
+    status = row.get("ApiInventoryStatus") or "UNKNOWN"
+    if status == "NO_WORKING_ORDER_FOUND_BY_API":
+        return "MISSING_PROTECTION"
+    if status == "OCO_STRUCTURE_FOUND_CONDITION_LEVELS_NOT_RETURNED":
+        return "API_CONFIRMED_STRUCTURE_MANUAL_VERIFY_TARGETS"
+    if status == "STOP_FOUND_TARGET_MISSING":
+        return "API_CONFIRMED_STOP_ONLY"
+    if status == "TARGET_FOUND_STOP_MISSING":
+        return "API_TARGET_FOUND_STOP_MISSING"
+    if status == "WORKING_ORDER_FOUND_UNCLASSIFIED":
+        return "API_STRUCTURE_REVIEW"
+    return status
+
+
+def api_oco_next_action(row):
+    status = api_oco_status(row)
+    if status == "MISSING_PROTECTION":
+        return "Build or locate OCO protection."
+    if status == "API_CONFIRMED_STRUCTURE_MANUAL_VERIFY_TARGETS":
+        return "API found OCO children and stop; manually verify target trigger levels if needed."
+    if status == "API_CONFIRMED_STOP_ONLY":
+        return "Target children were not found by API; review protection."
+    if status == "API_TARGET_FOUND_STOP_MISSING":
+        return "Stop child was not found by API; review protection."
+    return "Review API order structure."
+
+
+def build_api_oco_worksheet(rows):
+    worksheet = []
+    for row in rows:
+        worksheet.append({
+            "Account": row.get("Account", ""),
+            "ExpectedAccountEnding": row.get("ExpectedAccountEnding", ""),
+            "Portfolio": row.get("Portfolio", ""),
+            "Ticker": row.get("Ticker", ""),
+            "ContractLabel": row.get("ContractLabel", ""),
+            "ExpectedStop": row.get("ExpectedStop", ""),
+            "ExpectedT1": row.get("ExpectedT1", ""),
+            "ExpectedT2": row.get("ExpectedT2", ""),
+            "ApiWorkingChildRows": row.get("ApiWorkingChildRows", ""),
+            "ApiTargetChildren": row.get("ApiTargetChildren", ""),
+            "ApiStopChildren": row.get("ApiStopChildren", ""),
+            "ApiParentOcoIds": row.get("ApiParentOcoIds", ""),
+            "ApiStopPrices": row.get("ApiStopPrices", ""),
+            "ApiConditionThresholds": row.get("ApiConditionThresholds", ""),
+            "ApiInventoryStatus": row.get("ApiInventoryStatus", ""),
+            "WorksheetStatus": api_oco_status(row),
+            "NextAction": api_oco_next_action(row),
+        })
+    return worksheet
+
 
 def load_worklist_review():
     worklist_path = latest_file("swing-nightly-worklist-*.csv")
@@ -407,6 +509,18 @@ def desktop_oco_ready_items(batch):
         if item.get("Action") == "update_condition_threshold" and item.get("ReadyForDesktopAutomation") is True and item.get("AccountVerified") is True:
             ready.append(item)
     return ready
+
+
+def desktop_oco_update_items(batch):
+    items = batch.get("items") or []
+    updates = []
+    for item in items:
+        status = str(item.get("SnapshotStatus") or "").strip().upper()
+        if status in {"CANCELED", "FILLED"}:
+            continue
+        if item.get("Action") == "update_condition_threshold":
+            updates.append(item)
+    return updates
 
 
 def run_desktop_oco_batch_plan(body):
@@ -632,6 +746,42 @@ def run_tos_account_switch(target_account):
     return parsed or {"ok": True, "stdout": result.stdout}
 
 
+def ensure_tos_monitor_working_orders():
+    script = ROOT / "tools" / "Ensure-TosMonitorWorkingOrders.ps1"
+    if not script.exists():
+        raise FileNotFoundError(f"Missing TOS working-orders guard: {script}")
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-WindowTitle",
+        "Main@thinkorswim",
+        "-AllowInput",
+    ]
+    started = utc_now()
+    result = subprocess.run(command, cwd=str(ROOT), text=True, capture_output=True, timeout=420)
+    save_workflow_status({
+        "lastTosWorkingOrdersGuardStartedAt": started,
+        "lastTosWorkingOrdersGuardFinishedAt": utc_now(),
+        "lastTosWorkingOrdersGuardOk": result.returncode == 0,
+        "lastTosWorkingOrdersGuardCommand": " ".join(command),
+        "lastTosWorkingOrdersGuardStdout": result.stdout[-6000:],
+        "lastTosWorkingOrdersGuardStderr": result.stderr[-6000:],
+        "lastTosWorkingOrdersGuardError": "",
+    })
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "TOS is not ready on Monitor > Working Orders."
+        save_workflow_status({"lastTosWorkingOrdersGuardOk": False, "lastTosWorkingOrdersGuardError": message})
+        raise RuntimeError(message)
+    try:
+        return parse_json_from_process_output(result.stdout)
+    except Exception:
+        return {"ok": True, "stdout": result.stdout}
+
+
 def capture_tos_snapshot(label):
     script = ROOT / "tools" / "New-TosAutomationSnapshot.ps1"
     if not script.exists():
@@ -717,6 +867,7 @@ def prepare_tos_account_batch(body):
     if not queue_path:
         raise RuntimeError("No action queue is available after building the nightly update.")
     switch_result = run_tos_account_switch(account)
+    monitor_guard = ensure_tos_monitor_working_orders()
     snapshot = capture_tos_snapshot(f"AccountScopedOco-{account}")
     extracted = extract_tos_working_orders(snapshot["tree"], queue_path)
     status = run_nightly_reconciliation(
@@ -730,6 +881,7 @@ def prepare_tos_account_batch(body):
         "success": True,
         "account": account,
         "switch": switch_result,
+        "monitorWorkingOrdersGuard": monitor_guard,
         "snapshotJson": str(snapshot["json"]),
         "snapshotTree": str(snapshot["tree"]),
         "visibleOrdersPath": str(extracted["visible"]),
@@ -784,9 +936,7 @@ def quote_price(quote):
 
 
 def quote_bid_ask_mark(quote):
-    flat = dict(quote)
-    if isinstance(quote.get("quote"), dict):
-        flat.update(quote["quote"])
+    flat = flatten_quote(quote)
     bid = flat.get("bidPrice") or flat.get("bid")
     ask = flat.get("askPrice") or flat.get("ask")
     mark = flat.get("mark") or flat.get("markPrice")
@@ -810,6 +960,82 @@ def quote_bid_ask_mark(quote):
     except (TypeError, ValueError):
         last = None
     return {"bid": bid, "ask": ask, "mark": mark, "last": last}
+
+
+def flatten_quote(quote):
+    flat = dict(quote or {})
+    for key in ("quote", "regular", "fundamental"):
+        if isinstance((quote or {}).get(key), dict):
+            flat.update((quote or {})[key])
+    return flat
+
+
+QUOTE_TIME_KEYS = {
+    "quoteTime",
+    "quoteTimeInLong",
+    "tradeTime",
+    "tradeTimeInLong",
+    "bidTime",
+    "bidTimeInLong",
+    "askTime",
+    "askTimeInLong",
+    "regularMarketTradeTime",
+    "regularMarketTradeTimeInLong",
+}
+
+
+def quote_timestamp(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = value / 1000 if value > 10_000_000_000 else value
+        try:
+            return dt.datetime.fromtimestamp(seconds, dt.timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    if isinstance(value, str):
+        parsed = parse_utc(value)
+        if parsed:
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+        try:
+            numeric = float(value)
+        except ValueError:
+            return None
+        return quote_timestamp(numeric)
+    return None
+
+
+def latest_quote_timestamp(quote):
+    flat = flatten_quote(quote)
+    timestamps = [quote_timestamp(flat.get(key)) for key in QUOTE_TIME_KEYS]
+    timestamps = [value for value in timestamps if value is not None]
+    return max(timestamps) if timestamps else None
+
+
+def validate_quote_freshness(quotes):
+    window_status = live_entry_window_status()
+    max_age_seconds = int(config().get("maxQuoteAgeSeconds", 180))
+    runtime["last_quote_freshness"] = {
+        "checkedAt": utc_now(),
+        "maxQuoteAgeSeconds": max_age_seconds,
+        "liveEntryWindowOk": window_status["ok"],
+        "stale": [],
+    }
+    if not window_status["ok"] or not quotes:
+        return
+    now = dt.datetime.now(dt.timezone.utc)
+    stale = []
+    for symbol, quote in sorted(quotes.items()):
+        timestamp = latest_quote_timestamp(quote)
+        if timestamp is None:
+            stale.append(f"{symbol}: missing quote timestamp")
+            continue
+        age_seconds = (now - timestamp.astimezone(dt.timezone.utc)).total_seconds()
+        if age_seconds > max_age_seconds:
+            stale.append(f"{symbol}: {int(age_seconds)}s old")
+    runtime["last_quote_freshness"]["stale"] = stale
+    if stale:
+        raise RuntimeError("Stale Schwab quotes during live entry window: " + "; ".join(stale[:12]))
 
 
 def quote_distance(quote, operator, trigger):
@@ -840,8 +1066,13 @@ def parse_contract_label(label):
     match = re.match(r"(?P<strikes>[0-9.]+(?:/[0-9.]+)*)\s*(?P<right>[CP])\s+(?P<month>\d{2})-(?P<day>\d{2})", label.strip(), re.I)
     if not match:
         return []
-    year = dt.date.today().year
-    expiration = f"{year}-{match.group('month')}-{match.group('day')}"
+    today = dt.date.today()
+    month = int(match.group("month"))
+    day = int(match.group("day"))
+    expiration_date = dt.date(today.year, month, day)
+    if expiration_date < today:
+        expiration_date = dt.date(today.year + 1, month, day)
+    expiration = expiration_date.isoformat()
     right = "CALL" if match.group("right").upper() == "C" else "PUT"
     strikes = [float(x) for x in match.group("strikes").split("/")]
     return [{"expiration": expiration, "right": right, "strike": strike} for strike in strikes]
@@ -898,16 +1129,17 @@ def append_event(row_id_value, level, message, extra=None):
         "message": message,
         "extra": extra or {},
     }
-    ensure_dirs()
-    with EVENT_LOG.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    stored = state()
-    stored.setdefault("rows", {}).setdefault(row_id_value, {})
-    stored["rows"][row_id_value].update({
-        "lastEvent": message,
-        "updatedAt": payload["ts"],
-    })
-    save_state(stored)
+    with STATE_LOCK:
+        ensure_dirs()
+        with EVENT_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        stored = load_json(STATE_PATH, {"rows": {}})
+        stored.setdefault("rows", {}).setdefault(row_id_value, {})
+        stored["rows"][row_id_value].update({
+            "lastEvent": message,
+            "updatedAt": payload["ts"],
+        })
+        save_json(STATE_PATH, stored)
 
 
 def fetch_quotes(symbols):
@@ -923,20 +1155,68 @@ def fetch_quotes(symbols):
     return {}
 
 
+def refresh_dashboard_token(force=False):
+    if config().get("executionMode", "paper") != "live":
+        return
+    now = dt.datetime.now(dt.timezone.utc)
+    cadence_seconds = int(config().get("tokenRefreshSeconds", 600))
+    last = parse_utc(runtime.get("last_token_refresh_at"))
+    if (
+        not force
+        and last is not None
+        and (now - last).total_seconds() < max(60, cadence_seconds)
+    ):
+        return
+    base = config().get("tradingDashboardBaseUrl", "http://127.0.0.1:5080").rstrip("/")
+    request = urllib.request.Request(
+        base + "/api/schwab/refresh-token",
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        status = json.loads(response.read().decode("utf-8"))
+    runtime["last_token_refresh_at"] = utc_now()
+    runtime["last_token_refresh_error"] = None
+    if not status.get("connected"):
+        raise RuntimeError("TradingDashboard Schwab connection is not connected.")
+
+
 def refresh_quotes():
     rows, _ = load_pending_rows()
     symbols = [row["TriggerSymbol"] for row in rows]
     try:
-        runtime["quotes"] = fetch_quotes(symbols)
+        refresh_dashboard_token()
+        quotes = fetch_quotes(symbols)
+        validate_quote_freshness(quotes)
+        runtime["quotes"] = quotes
+        runtime["last_quote_refresh_at"] = utc_now()
         runtime["last_quote_error"] = None
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        runtime["last_quote_error"] = str(exc)
+    except (urllib.error.URLError, TimeoutError, ValueError, RuntimeError) as exc:
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 401:
+            try:
+                refresh_dashboard_token(force=True)
+                quotes = fetch_quotes(symbols)
+                validate_quote_freshness(quotes)
+                runtime["quotes"] = quotes
+                runtime["last_quote_refresh_at"] = utc_now()
+                runtime["last_quote_error"] = None
+                return
+            except (urllib.error.URLError, TimeoutError, ValueError, RuntimeError) as retry_exc:
+                runtime["last_token_refresh_error"] = str(retry_exc)
+                runtime["last_quote_error"] = str(retry_exc)
+        else:
+            runtime["last_quote_error"] = str(exc)
+        runtime["quotes"] = {}
 
 
-def monitor_loop():
+def monitor_loop_body():
     while runtime["monitor_running"]:
         refresh_quotes()
         reconcile_live_orders()
+        if runtime["last_quote_error"]:
+            time.sleep(max(1, int(config().get("quotePollSeconds", 5))))
+            continue
         rows, _ = load_pending_rows()
         stored = state()
         for row in rows:
@@ -958,9 +1238,11 @@ def monitor_loop():
                 except Exception as exc:
                     local["status"] = "live_replace_failed"
                     append_event(ident, "error", f"Live cancel/replace failed: {exc}", {"orderId": local.get("schwabOrderId", "")})
-                    stored = state()
-                    stored.setdefault("rows", {}).setdefault(ident, {}).update(local)
-                    save_state(stored)
+                    update_row_state(ident, runtime_row_updates(local))
+                latest_stored = state()
+                local = latest_stored.setdefault("rows", {}).setdefault(ident, {})
+                status = local.get("status")
+                already_has_live_order = bool(local.get("schwabOrderId"))
             if row["triggerHit"] and status not in blocked_statuses and not already_has_live_order:
                 if mode == "live":
                     window_status = live_entry_window_status()
@@ -969,8 +1251,7 @@ def monitor_loop():
                         if local.get("lastLiveWindowBlockKey") != block_key:
                             local["lastLiveWindowBlockKey"] = block_key
                             append_event(ident, "warning", "Skipped live submit outside configured entry window.", window_status)
-                        stored.setdefault("rows", {}).setdefault(ident, {}).update(local)
-                        save_state(stored)
+                        update_row_state(ident, runtime_row_updates(local))
                         continue
                 local["status"] = "triggered"
                 append_event(ident, "info", f"Trigger hit for {row['Ticker']} at {row.get('TriggerOperator')} {row.get('TriggerPrice')}", {"mode": mode})
@@ -995,10 +1276,23 @@ def monitor_loop():
                     except Exception as exc:
                         local["status"] = "live_submit_failed"
                         append_event(ident, "error", f"Live submit failed: {exc}", row["orderPlan"])
-                stored = state()
-                stored.setdefault("rows", {}).setdefault(ident, {}).update(local)
-                save_state(stored)
+                update_row_state(ident, runtime_row_updates(local))
         time.sleep(max(1, int(config().get("quotePollSeconds", 5))))
+
+
+def monitor_loop():
+    while runtime["monitor_desired"]:
+        runtime["monitor_running"] = True
+        try:
+            monitor_loop_body()
+        except Exception as exc:
+            runtime["last_monitor_error"] = str(exc)
+            runtime["last_order_error"] = f"Monitor cycle failed unexpectedly: {exc}"
+            runtime["monitor_restart_count"] += 1
+            if runtime["monitor_desired"]:
+                time.sleep(max(1, int(config().get("quotePollSeconds", 5))))
+    runtime["monitor_running"] = False
+    runtime["thread"] = None
 
 
 def reconcile_live_orders():
@@ -1015,27 +1309,36 @@ def reconcile_live_orders():
     except Exception as exc:
         runtime["last_order_error"] = str(exc)
         return
-    changed = False
+    runtime["last_order_error"] = None
     for row_id_value, row_state in tracked.items():
         order_id = str(row_state.get("schwabOrderId"))
         broker = lookup.get(order_id)
         if not broker:
             continue
+        broker, replacement_ids = resolve_replacement_chain(broker, lookup)
         broker_status = str(broker.get("status") or "")
-        row_state["brokerStatus"] = broker_status
-        row_state["brokerEnteredTime"] = broker.get("enteredTime", "")
-        row_state["filledQuantity"] = broker.get("filledQuantity", "")
-        row_state["remainingQuantity"] = broker.get("remainingQuantity", "")
+        updates = {
+            "brokerStatus": broker_status,
+            "brokerEnteredTime": broker.get("enteredTime", ""),
+            "filledQuantity": broker.get("filledQuantity", ""),
+            "remainingQuantity": broker.get("remainingQuantity", ""),
+        }
+        resolved_order_id = str(broker.get("orderId") or order_id)
+        if resolved_order_id != order_id:
+            prior_ids = list(row_state.get("replacedOrderIds") or [])
+            for replaced_id in replacement_ids:
+                if replaced_id not in prior_ids:
+                    prior_ids.append(replaced_id)
+            updates["replacedOrderIds"] = prior_ids
+            updates["schwabOrderId"] = resolved_order_id
         next_status = swing_status_from_broker(broker_status)
         if next_status and row_state.get("status") != next_status:
-            row_state["status"] = next_status
-            row_state["updatedAt"] = utc_now()
-            append_event(row_id_value, "info", f"Broker status is {broker_status}.", {"orderId": order_id})
-            changed = True
+            updates["status"] = next_status
+            updates["updatedAt"] = utc_now()
+            update_row_state(row_id_value, updates)
+            append_event(row_id_value, "info", f"Broker status is {broker_status}.", {"orderId": resolved_order_id, "replacedOrderIds": replacement_ids})
         else:
-            changed = True
-    if changed:
-        save_state(stored)
+            update_row_state(row_id_value, updates)
 
 
 def fetch_recent_order_lookup():
@@ -1063,11 +1366,63 @@ def confirm_submitted_order(order_id, attempts=6, delay_seconds=1):
     return None
 
 
+def replacement_signature(order):
+    legs = []
+    for leg in order.get("orderLegCollection") or []:
+        instrument = leg.get("instrument") or {}
+        legs.append((
+            str(leg.get("instruction") or "").upper(),
+            str(instrument.get("symbol") or "").strip().upper(),
+            float(leg.get("quantity") or 0),
+        ))
+    return (
+        str(order.get("accountNumber") or ""),
+        str(order.get("orderType") or "").upper(),
+        str(order.get("complexOrderStrategyType") or "").upper(),
+        float(order.get("quantity") or 0),
+        tuple(legs),
+    )
+
+
+def resolve_replacement_chain(order, lookup, max_gap_seconds=120):
+    current = order
+    replaced_ids = []
+    visited = set()
+    while str(current.get("status") or "").upper() == "REPLACED":
+        current_id = str(current.get("orderId") or "")
+        if not current_id or current_id in visited:
+            break
+        visited.add(current_id)
+        close_time = parse_utc(current.get("closeTime"))
+        if close_time is None:
+            break
+        signature = replacement_signature(current)
+        candidates = []
+        for candidate in lookup.values():
+            candidate_id = str(candidate.get("orderId") or "")
+            if not candidate_id or candidate_id in visited:
+                continue
+            if replacement_signature(candidate) != signature:
+                continue
+            entered_time = parse_utc(candidate.get("enteredTime"))
+            if entered_time is None:
+                continue
+            gap_seconds = (entered_time - close_time).total_seconds()
+            if -2 <= gap_seconds <= max_gap_seconds:
+                candidates.append((abs(gap_seconds), entered_time, candidate))
+        if not candidates:
+            break
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        replaced_ids.append(current_id)
+        current = candidates[0][2]
+    return current, replaced_ids
+
+
 def swing_status_from_broker(status):
     text = (status or "").upper()
     if text in {"FILLED"}:
         return "filled_pending_oco"
-    if text in {"CANCELED", "CANCELLED", "REJECTED", "EXPIRED"}:
+    if text in {"CANCELED", "CANCELLED", "REJECTED", "EXPIRED", "REPLACED"}:
         return "broker_terminal"
     if text in {"WORKING", "PENDING_ACTIVATION", "QUEUED", "ACCEPTED", "AWAITING_CONDITION"}:
         return "live_working"
@@ -1215,15 +1570,7 @@ def submit_live_order(row, phase):
     }
     save_json(plan_path, plan)
     completed = subprocess.run(
-        [
-            "dotnet",
-            "run",
-            "--project",
-            str(SUBMIT_PROJECT),
-            "--",
-            "submit-plan",
-            str(plan_path),
-        ],
+        submit_helper_command("submit-plan", str(plan_path)),
         cwd=str(ROOT),
         capture_output=True,
         text=True,
@@ -1247,16 +1594,10 @@ def submit_live_order(row, phase):
 
 def cancel_live_order(row, order_id):
     completed = subprocess.run(
-        [
-            "dotnet",
-            "run",
-            "--project",
-            str(SUBMIT_PROJECT),
-            "--",
+        submit_helper_command(
             "cancel-order",
             str(row.get("Account") or ""),
-            str(order_id),
-        ],
+            str(order_id)),
         cwd=str(ROOT),
         capture_output=True,
         text=True,
@@ -1268,6 +1609,12 @@ def cancel_live_order(row, order_id):
     if not result.get("accepted"):
         raise RuntimeError(f"Schwab did not accept cancel request: {result}")
     return result
+
+
+def submit_helper_command(*arguments):
+    if SUBMIT_DLL.exists():
+        return ["dotnet", str(SUBMIT_DLL), *arguments]
+    return ["dotnet", "run", "--project", str(SUBMIT_PROJECT), "--", *arguments]
 
 
 def submitted_limit(submit_result):
@@ -1286,6 +1633,27 @@ def order_is_working(row_state):
     if broker in {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED"} or "PARTIAL" in broker:
         return False
     return status in {"live_working", "live_submitted_unconfirmed"}
+
+
+def broker_status_terminal(status):
+    return str(status or "").upper() in {
+        "CANCELED", "CANCELLED", "REJECTED", "EXPIRED", "FILLED"
+    }
+
+
+def broker_status_stable_for_replace(status):
+    text = str(status or "").upper()
+    return broker_status_terminal(text) or "PARTIAL" in text
+
+
+def wait_for_terminal_order(order_id, attempts=12, delay_seconds=0.25):
+    latest = None
+    for _ in range(attempts):
+        latest = fetch_recent_order_lookup().get(str(order_id))
+        if latest and broker_status_stable_for_replace(latest.get("status")):
+            return latest
+        time.sleep(delay_seconds)
+    return latest
 
 
 def maybe_replace_with_mark(row, row_state):
@@ -1316,15 +1684,28 @@ def maybe_replace_with_mark(row, row_state):
 
     append_event(row["id"], "info", "Canceling initial live order before mark replacement.", {"orderId": order_id})
     cancel = cancel_live_order(row, order_id)
+    terminal = wait_for_terminal_order(order_id)
+    terminal_status = str((terminal or {}).get("status") or "").upper()
+    if not terminal or not broker_status_stable_for_replace(terminal_status):
+        row_state["status"] = "live_replace_blocked_cancel_unconfirmed"
+        row_state["lastCancelResult"] = cancel
+        row_state["lastCancelReplaceAt"] = utc_now()
+        update_row_state(row["id"], row_state)
+        append_event(row["id"], "error", "Replacement blocked because the original order did not reach a terminal broker state.", {"orderId": order_id, "brokerStatus": terminal_status or "UNAVAILABLE"})
+        return False
+    if terminal_status == "FILLED" or "PARTIAL" in terminal_status:
+        row_state["status"] = "filled_pending_oco" if terminal_status == "FILLED" else "partial_fill_review"
+        row_state["brokerStatus"] = terminal_status
+        update_row_state(row["id"], row_state)
+        append_event(row["id"], "warning", "Replacement suppressed because the original order filled during cancellation.", {"orderId": order_id, "brokerStatus": terminal_status})
+        return False
     replaced = list(row_state.get("replacedOrderIds") or [])
     replaced.append(order_id)
     row_state["replacedOrderIds"] = replaced
     row_state["lastCancelResult"] = cancel
     row_state["lastCancelReplaceAt"] = utc_now()
     row_state["status"] = "live_replacing"
-    stored = state()
-    stored.setdefault("rows", {}).setdefault(row["id"], {}).update(row_state)
-    save_state(stored)
+    update_row_state(row["id"], row_state)
 
     submit = submit_live_order(row, "mark")
     row_state.update({
@@ -1339,9 +1720,7 @@ def maybe_replace_with_mark(row, row_state):
         "submittedAt": utc_now(),
         "cancelReplaceCount": int(row_state.get("cancelReplaceCount") or 0) + 1,
     })
-    stored = state()
-    stored.setdefault("rows", {}).setdefault(row["id"], {}).update(row_state)
-    save_state(stored)
+    update_row_state(row["id"], row_state)
     append_event(row["id"], "info", "Replaced live order at mark pricing.", submit)
     return True
 
@@ -1351,6 +1730,7 @@ def start_monitor():
         return
     if config().get("executionMode") == "live":
         live_preflight()
+    runtime["monitor_desired"] = True
     runtime["monitor_running"] = True
     runtime["monitor_started_at"] = utc_now()
     thread = threading.Thread(target=monitor_loop, daemon=True)
@@ -1359,6 +1739,7 @@ def start_monitor():
 
 
 def stop_monitor():
+    runtime["monitor_desired"] = False
     runtime["monitor_running"] = False
 
 
@@ -1394,7 +1775,11 @@ def live_preflight():
                 f"expires={token_expires.isoformat()}, requiredThrough={token_required_through.isoformat()}"
             )
         if not status.get("orderCapability"):
-            issues.append("TradingDashboard Schwab order capability is not enabled.")
+            warnings.append(
+                "TradingDashboard Schwab order capability is not enabled. "
+                "Swing Manager direct Schwab submit remains allowed because it uses the shared OAuth token, "
+                "account-number lookup, and Schwab API submit helper instead of TradingDashboard order routes."
+            )
     except Exception as exc:
         issues.append(f"Could not refresh/read Schwab status: {exc}")
     try:
@@ -1430,6 +1815,7 @@ def live_preflight():
         "manualOcoMode": manual_oco_mode,
         "tokenExpiresUtc": status.get("accessTokenExpiresUtc") if "status" in locals() else "",
         "tokenRequiredThroughUtc": token_required_through.isoformat() if token_required_through else "",
+        "dashboardOrderCapability": bool(status.get("orderCapability")) if "status" in locals() else False,
         "cancelReplaceLadder": bool(cfg.get("enableCancelReplaceLadder", False)),
         "bidPhaseSeconds": int(cfg.get("bidPhaseSeconds", 60)),
     }
@@ -1487,10 +1873,17 @@ class Handler(BaseHTTPRequestHandler):
                 "config": config(),
                 "runtime": {
                     "monitorRunning": runtime["monitor_running"],
+                    "monitorDesired": runtime.get("monitor_desired"),
                     "monitorStartedAt": runtime["monitor_started_at"],
+                    "monitorRestartCount": runtime.get("monitor_restart_count", 0),
+                    "lastMonitorError": runtime.get("last_monitor_error"),
                     "lastQuoteError": runtime["last_quote_error"],
+                    "lastQuoteRefreshAt": runtime.get("last_quote_refresh_at"),
+                    "lastQuoteFreshness": runtime.get("last_quote_freshness"),
                     "lastOrderError": runtime.get("last_order_error"),
                     "lastLivePreflight": runtime.get("last_live_preflight"),
+                    "lastTokenRefreshAt": runtime.get("last_token_refresh_at"),
+                    "lastTokenRefreshError": runtime.get("last_token_refresh_error"),
                     "quoteCount": len(runtime["quotes"]),
                 },
                 "rows": rows,
@@ -1515,13 +1908,12 @@ class Handler(BaseHTTPRequestHandler):
             ident = body.get("id")
             if not ident:
                 return self.send_json({"error": "id is required"}, status=400)
-            stored = state()
-            row_state = stored.setdefault("rows", {}).setdefault(ident, {})
+            updates = {}
             for key in ("enabled", "deleted", "status"):
                 if key in body:
-                    row_state[key] = body[key]
-            row_state["updatedAt"] = utc_now()
-            save_state(stored)
+                    updates[key] = body[key]
+            updates["updatedAt"] = utc_now()
+            update_row_state(ident, updates)
             return self.send_json({"ok": True})
         if parsed.path == "/api/nightly/upload-json":
             try:
@@ -1608,6 +2000,9 @@ def main():
     port = int(os.environ.get("SWING_MANAGER_PORT", "8765"))
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"Swing Manager pending server listening on http://{host}:{port}")
+    if parse_bool(os.environ.get("SWING_MANAGER_AUTO_START_MONITOR", "false")):
+        start_monitor()
+        print("Swing Manager monitor started automatically after live preflight.")
     server.serve_forever()
 
 

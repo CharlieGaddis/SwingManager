@@ -2,6 +2,8 @@
 
 The pending order manager watches the Squeeze Intel pending entries without placing broker-side conditional entry orders. This avoids tying up IRA buying power or Living Trust option buying power before the underlying stock trigger is actually hit.
 
+Production rule: Swing Manager is live-approved for pending-entry submission. Do not turn off Swing Manager's ability to enter trades as a side effect of TradingDashboard order-capability changes; TradingDashboard is used for Schwab auth, quotes, account lookup, and reconciliation, while Swing Manager owns the pending-entry submit path.
+
 ## Inputs
 
 - Latest action queue: `Analysis\squeeze-action-queue-YYYYMMDD.csv`
@@ -52,7 +54,7 @@ Planned live option fill method:
 - Before each refresh/replace, re-check that the underlying is still at a valid entry price.
 - Reconcile fills from Schwab/TOS, then create or maintain OCO management orders in TOS.
 
-Live Schwab transmission remains intentionally guarded by `Config\pending-manager.json` until the final Schwab submit adapter is reviewed and enabled.
+Live Schwab transmission is production-enabled through `Config\pending-manager.json` when `executionMode` is `live`; do not downgrade it to paper or block entry submission unless Charlie explicitly asks for live entry to be disabled.
 
 ## 2026-08-12 Live Submit Breakthrough
 
@@ -97,6 +99,7 @@ The monitor now has a safer live baseline:
   - Schwab connected.
   - Access token not expired.
   - IRA and Living Trust account numbers resolvable.
+  - TradingDashboard's separate order-capability flag is informational for Swing Manager and must not block Swing Manager live entries.
 - Live submit is not considered accepted unless Schwab returns both success and an order id.
 - After submit, Swing Manager attempts immediate readback confirmation from Schwab recent orders.
 - Submitted live orders are reconciled through the TradingDashboard Schwab order endpoint.
@@ -108,6 +111,7 @@ Broker status mapping:
 - partial status -> `partial_fill_review`
 - `WORKING`, `PENDING_ACTIVATION`, `QUEUED`, `ACCEPTED`, `AWAITING_CONDITION` -> `live_working`
 - `CANCELED`, `CANCELLED`, `REJECTED`, `EXPIRED` -> `broker_terminal`
+- `REPLACED` -> follow the matching Schwab replacement-order chain; apply the final order's status and ID. If no successor can be resolved, use `broker_terminal`.
 
 Remaining live launch choice for Charlie:
 
