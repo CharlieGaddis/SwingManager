@@ -14,12 +14,23 @@ See [PortableTwoMachineSetup.md](PortableTwoMachineSetup.md) for the desktop and
 laptop profile rules. The coordinated installer and Git workflow live in
 TradingDashboard `Docs\LAPTOP_DEPLOYMENT.md`. Git synchronizes source code only;
 runtime state, account selectors, OAuth, and TOS artifacts remain local.
+Use [CROSS_ASSISTANT_HANDOFF.md](CROSS_ASSISTANT_HANDOFF.md) with
+TradingDashboard `Docs\CROSS_ASSISTANT_HANDOFF.md` to keep Codex, ChatGPT, the
+desktop, and the laptop aligned without mixing SwingManager and intraday
+dashboard context.
 
 ## Mission
 
 Swing Manager manages Squeeze Intel swing trades from daily JSON reports and coordinates with Schwab/thinkorswim.
 
 Production rule: Swing Manager is the approved production path for pending swing entries. Do not disable its ability to enter live Schwab trades because TradingDashboard's separate dashboard order capability is off. Swing Manager's purpose is to wait for the underlying trigger and submit only then, avoiding broker-side conditional entry orders that would consume IRA or Living Trust buying power early.
+
+Planned broker migration: after TradingDashboard proves a seamless IBKR paper
+lifecycle and Charlie separately approves live rollout, Living Trust
+option/spread transactions are expected to migrate to Interactive Brokers.
+IRA stock transactions remain on Schwab/thinkorswim for now; improve the
+existing TOS stop and target update workflow independently. This roadmap does
+not change current production routing or authorize live IBKR orders.
 
 Core responsibilities:
 
